@@ -18,8 +18,8 @@
 #include <math.h>
 #include <pthread.h>
 
-#define MAX_STRING 100                                                  // 一个词的最大长度
-#define EXP_TABLE_SIZE 1000                                             // 对sigmoid的运算结果进行缓存，存储1000个，需要用的时候查表
+#define MAX_STRING 100                                                  // 一个词的最大字符长度（英语：单词的字符个数，汉语：词中字个数）
+#define EXP_TABLE_SIZE 1000                                             // 对sigmoid的函数值进行缓存，存储1000个，需要用的时候查表，x范围是[-MAX_EXP, MAX_EXP]
 #define MAX_EXP 6                                                       // 最大计算到6 (exp^6 / (exp^6 + 1))，最小计算到-6 (exp^-6 / (exp^-6 + 1))
 #define MAX_SENTENCE_LENGTH 1000                                        // 定义最大的句子长度(词个数)
 #define MAX_CODE_LENGTH 40                                              // vocab_word中point域和code域最大大小，定义最长的哈夫曼编码和路径长度
@@ -94,55 +94,72 @@ clock_t start;
  * hs                   采用hs还是ns的标志位，默认采用ng
  */
 int hs = 0, negative = 5;
-const int table_size = 1e8;                                             // 静态采样表的规模
-int *table;                                                             // 采样表
+const int table_size = 1e8;                                                         // 静态采样表的规模
+int *table;                                                                         // 采样表
 
+
+/**
+ * 根据词频生成采样表，也就是每个单词的能量分布表，table在负采样中用到
+ */
 void InitUnigramTable() {
     int a, i;
-    double train_words_pow = 0;
-    double d1, power = 0.75;
+    double train_words_pow = 0;                                                     // 词汇表的能量总值
+    double d1, power = 0.75;                                                        // 概率与词频的power次方成正比
     table = (int *) malloc(table_size * sizeof(int));
-    for (a = 0; a < vocab_size; a++) train_words_pow += pow(vocab[a].cn, power);
+    for (a = 0; a < vocab_size; a++) train_words_pow += pow(vocab[a].cn, power);    // 遍历词汇表，统计词的能量总值
+
     i = 0;
-    d1 = pow(vocab[i].cn, power) / train_words_pow;
-    for (a = 0; a < table_size; a++) {
-        table[a] = i;
-        if (a / (double) table_size > d1) {
-            i++;
-            d1 += pow(vocab[i].cn, power) / train_words_pow;
+    d1 = pow(vocab[i].cn, power) / train_words_pow;                                 // 表示已遍历词的能量值占总能量的比，可以理解成非等距能量值
+    for (a = 0; a < table_size; a++) {                                              // a：table表的索引，可以理解成等距采样点
+        table[a] = i;                                                               // i：词汇表的索引，将待距采样点映射到非等距能量值，并将该能量值对应的词记录到采样表中
+        if (a / (double) table_size > d1) {                                         // 采样范围超出能量范围时，跳到下一个能量值（即i++）
+            i++;                                                                    // 跳到下一个能量值
+            d1 += pow(vocab[i].cn, power) / train_words_pow;                        // 累加下一个词的能量值
         }
-        if (i >= vocab_size) i = vocab_size - 1;
+        if (i >= vocab_size) i = vocab_size - 1;                                    // 处理最后一段能量值，所有落在最后一个能量值后的，都选中最后一个词
     }
 }
 
-// Reads a single word from a file, assuming space + tab + EOL to be word boundaries
+/**
+ * Reads a single word from a file, assuming space + tab + EOL to be word boundaries
+ * 每次从fin中读取一个单词
+ * 构建词库的过程，开始读取文件中的每一个词
+ * @param word
+ * @param fin
+ * @param eof
+ */
 void ReadWord(char *word, FILE *fin, char *eof) {
-    int a = 0, ch;
+    int a = 0, ch;                                                                  // a：用于向word中插入字符的索引；ch：从fin中读取的每个字符
     while (1) {
         ch = fgetc_unlocked(fin);
-        if (ch == EOF) {
+        if (ch == EOF) {                                                            // 结束符
             *eof = 1;
             break;
         }
-        if (ch == 13) continue;
-        if ((ch == ' ') || (ch == '\t') || (ch == '\n')) {
+        if (ch == 13) continue;                                                     // 回车，开始新的一行，重新开始while循环读取下一个字符
+        if ((ch == ' ') || (ch == '\t') || (ch == '\n')) {                          // 当遇到space(' ') + tab(\t) + EOL(\n)时，认为word结束，UNIX/Linux中‘\n’为一行的结束符号，windows中为：“<回车><换行>”，即“\r\n”；Mac系统里，每行结尾是“<回车>”,即“\r”。
             if (a > 0) {
-                if (ch == '\n') ungetc(ch, fin);
+                if (ch == '\n') ungetc(ch, fin);                                    // 跳出while循环，这里的特例是‘\n’，我们需要将‘\n’回退给fin，词汇表中'\n'用</s>来表示。
                 break;
             }
             if (ch == '\n') {
-                strcpy(word, (char *) "</s>");
+                strcpy(word, (char *) "</s>");                                      // 此时word还为空(a=0)，直接将</s>赋给word
                 return;
-            } else continue;
+            } else continue;                                                        // 此时a＝0，且遇到的为\t or ' '，直接跳过取得下一个字符
         }
         word[a] = ch;
         a++;
-        if (a >= MAX_STRING - 1) a--;   // Truncate too long words
+        if (a >= MAX_STRING - 1) a--;                                               // Truncate too long words
     }
-    word[a] = 0;
+    word[a] = 0;                                                                    // 字符串末尾以/0作为结束符
 }
 
-// Returns hash value of a word
+/**
+ * Returns hash value of a word
+ * 返回一个词的hash值
+ * @param word 词
+ * @return 词的hash值
+ */
 int GetWordHash(char *word) {
     unsigned long long a, hash = 0;
     for (a = 0; a < strlen(word); a++) hash = hash * 257 + word[a];
@@ -150,111 +167,152 @@ int GetWordHash(char *word) {
     return hash;
 }
 
-// Returns position of a word in the vocabulary; if the word is not found, returns -1
+/**
+ * Returns position of a word in the vocabulary; if the word is not found, returns -1
+ * 线性探索，开放定址法
+ * 查找词在词库中位置，检索词是否存在。如不存在则返回-1，否则，返回该词在词库中的索引
+ * @param word 词
+ * @return 如词库中不存在该词则返回-1，否则，返回该词在词库中的索引
+ */
 int SearchVocab(char *word) {
     unsigned int hash = GetWordHash(word);
     while (1) {
-        if (vocab_hash[hash] == -1) return -1;
-        if (!strcmp(word, vocab[vocab_hash[hash]].word)) return vocab_hash[hash];
-        hash = (hash + 1) % vocab_hash_size;
+        if (vocab_hash[hash] == -1) return -1;                                      // 没有这个词
+        if (!strcmp(word, vocab[vocab_hash[hash]].word)) return vocab_hash[hash];   // 返回单词在词库中的索引
+        hash = (hash + 1) % vocab_hash_size;                                        // 哈希冲突，线性探索继续顺序往下查找，因为前面存储的时候，遇到冲突就是顺序往下查找存储位置的
     }
     return -1;
 }
 
-// Reads a word and returns its index in the vocabulary
+/**
+ * Reads a word and returns its index in the vocabulary
+ * 从文件流中读取一个词，并返回这个词在词库中的位置
+ * @param fin
+ * @param eof
+ * @return 如词库中不存在该词则返回-1，否则，返回该词在词库中的索引
+ */
 int ReadWordIndex(FILE *fin, char *eof) {
     char word[MAX_STRING], eof_l = 0;
     ReadWord(word, fin, &eof_l);
-    if (eof_l) {
+    if (eof_l) {                                                                    // 当文件只有一个EOF字符时，当将EOF读入word后，_IOEOF被设置，达到文件尾。
         *eof = 1;
         return -1;
     }
     return SearchVocab(word);
 }
 
-// Adds a word to the vocabulary
+/**
+ * Adds a word to the vocabulary
+ * 将一个词添加到一个词汇中，返回该词在词库中的位置
+ * 词不存在，把它添加到词库中，通过hash表存储。否则：词频+1
+ * @param word  词
+ * @return 返回添加的词在词库中的存储位置
+ */
 int AddWordToVocab(char *word) {
     unsigned int hash, length = strlen(word) + 1;
-    if (length > MAX_STRING) length = MAX_STRING;
-    vocab[vocab_size].word = (char *) calloc(length, sizeof(char));
-    strcpy(vocab[vocab_size].word, word);
-    vocab[vocab_size].cn = 0;
-    vocab_size++;
+    if (length > MAX_STRING) length = MAX_STRING;                                   // 截断词，最长字符数为MAX_STRING（100）
+    vocab[vocab_size].word = (char *) calloc(length, sizeof(char));                 // 分配词存储空间
+    strcpy(vocab[vocab_size].word, word);                                           // 复制词
+    vocab[vocab_size].cn = 0;                                                       // 词频记为0，在调用函数之外赋值1
+    vocab_size++;                                                                   // 词库现有单词数加1
     // Reallocate memory if needed
     if (vocab_size + 2 >= vocab_max_size) {
-        vocab_max_size += 1000;
+        vocab_max_size += 1000;                                                     // 每次增加1000个词位
         vocab = (struct vocab_word *) realloc(vocab, vocab_max_size * sizeof(struct vocab_word));
     }
-    hash = GetWordHash(word);
-    while (vocab_hash[hash] != -1) hash = (hash + 1) % vocab_hash_size;
-    vocab_hash[hash] = vocab_size - 1;
-    return vocab_size - 1;
+    hash = GetWordHash(word);                                                       // 获得hash值
+    while (vocab_hash[hash] != -1) hash = (hash + 1) % vocab_hash_size;             // 哈希冲突，线性探索继续顺序往下查找
+    vocab_hash[hash] = vocab_size - 1;                                              // 记录词在词库中的存储位置
+    return vocab_size - 1;                                                          // 返回添加的词在词库中的存储位置
 }
 
-// Used later for sorting by word counts
+/**
+ * Used later for sorting by word counts
+ * 按词频排序，关键结构体比较函数，词库需使用词频进行排序(qsort)，按词频从大到小（非递增，相等时保留原词序）进行排序
+ * @param a
+ * @param b
+ * @return
+ */
 int VocabCompare(const void *a, const void *b) {
     long long l = ((struct vocab_word *) b)->cn - ((struct vocab_word *) a)->cn;
     if (l > 0) return 1;
     if (l < 0) return -1;
-    return 0;
+    return 0;                                                                       // 词频相等，保留原词序
 }
 
-// Sorts the vocabulary by frequency using word counts
+/**
+ * Sorts the vocabulary by frequency using word counts
+ * 按词频排序，通过排序把出现数量少的word排在vocab数组的后面
+ * 同时，给哈夫曼编码和路径的词库索引分配空间
+ */
 void SortVocab() {
     int a, size;
     unsigned int hash;
     // Sort the vocabulary and keep </s> at the first position
-    qsort(&vocab[1], vocab_size - 1, sizeof(struct vocab_word), VocabCompare);
-    for (a = 0; a < vocab_hash_size; a++) vocab_hash[a] = -1;
+    qsort(&vocab[1], vocab_size - 1, sizeof(struct vocab_word), VocabCompare);      // 保留</s>在首位，排序范围是[1, vocab_size - 1]，对词库进行快速排序
+    for (a = 0; a < vocab_hash_size; a++) vocab_hash[a] = -1;                       // 词库重排序了，哈希记录的index也乱了，所有的hash记录清除，下面会重建
     size = vocab_size;
-    train_words = 0;
+    train_words = 0;                                                                // 已训练的词汇总数（词频累加）
     for (a = 0; a < size; a++) {
         // Words occuring less than min_count times will be discarded from the vocab
-        if ((vocab[a].cn < min_count) && (a != 0)) {
-            vocab_size--;
-            free(vocab[a].word);
-        } else {
+        if ((vocab[a].cn < min_count) && (a != 0)) {                                // 清除低频词，</s>放在vocab的第一位
+            vocab_size--;                                                           // 词库中的词数减1
+            free(vocab[a].word);                                                    // 释放该词存储空间
+        } else {                                                                    // 重新计算hash映射
             // Hash will be re-computed, as after the sorting it is not actual
-            hash = GetWordHash(vocab[a].word);
-            while (vocab_hash[hash] != -1) hash = (hash + 1) % vocab_hash_size;
+            hash = GetWordHash(vocab[a].word);                                      // 计算hash
+            while (vocab_hash[hash] != -1) hash = (hash + 1) % vocab_hash_size;     // 哈希冲突，线性探索继续顺序往下查找
             vocab_hash[hash] = a;
-            train_words += vocab[a].cn;
+            train_words += vocab[a].cn;                                             // 词频累加
         }
     }
+
+    /**
+     * 重新指定vocab的内存大小，realloc 可重新指定vocab的内存大小，可大可小
+     * 重新分配vocab_size + 1个词的存储空间，原词库中vocab_size + 1后的低频词全部删除
+     */
     vocab = (struct vocab_word *) realloc(vocab, (vocab_size + 1) * sizeof(struct vocab_word));
+
     // Allocate memory for the binary tree construction
-    for (a = 0; a < vocab_size; a++) {
+    for (a = 0; a < vocab_size; a++) {                                              // 给词的哈夫曼编码和路径分配最大空间
         vocab[a].code = (char *) calloc(MAX_CODE_LENGTH, sizeof(char));
         vocab[a].point = (int *) calloc(MAX_CODE_LENGTH, sizeof(int));
     }
 }
 
-// Reduces the vocabulary by removing infrequent tokens
+/**
+ * Reduces the vocabulary by removing infrequent tokens
+ * 如果词库的大小N>0.7*vocab_hash_size，则从词库中删除所有词频小于min_reduce的词。
+ */
 void ReduceVocab() {
-    int a, b = 0;
+    int a, b = 0;                                                                   // 设置两个下标对词库删除低频词，a：遍历词库，b：规整词库，将词移动到词库左端
     unsigned int hash;
-    for (a = 0; a < vocab_size; a++)
-        if (vocab[a].cn > min_reduce) {
+    for (a = 0; a < vocab_size; a++)                                                // 遍历词库，删除低频词
+        if (vocab[a].cn > min_reduce) {                                             // 规整到词库左端
             vocab[b].cn = vocab[a].cn;
             vocab[b].word = vocab[a].word;
             b++;
-        } else free(vocab[a].word);
-    vocab_size = b;
-    for (a = 0; a < vocab_hash_size; a++) vocab_hash[a] = -1;
-    for (a = 0; a < vocab_size; a++) {
+        } else free(vocab[a].word);                                                 // 删除低频词
+    vocab_size = b;                                                                 // 删除低频词后的词库大小，最后剩下b个词，词频均大于min_reduce
+    for (a = 0; a < vocab_hash_size; a++) vocab_hash[a] = -1;                       // 规整词库后，hash映射已经打乱，所有的hash记录清除，下面会重建
+    for (a = 0; a < vocab_size; a++) {                                              // 重建hash映射
         // Hash will be re-computed, as it is not actual
         hash = GetWordHash(vocab[a].word);
-        while (vocab_hash[hash] != -1) hash = (hash + 1) % vocab_hash_size;
+        while (vocab_hash[hash] != -1) hash = (hash + 1) % vocab_hash_size;         // 哈希冲突，线性探索继续顺序往下查找
         vocab_hash[hash] = a;
     }
-    fflush(stdout);
-    min_reduce++;
+    fflush(stdout);                                                                 // 清空输出缓冲区，并把缓冲区内容输出，及时地打印数据到屏幕上
+    min_reduce++;                                                                   // 每次删除低频词后，词库中的词频都已经大于min_reduce，若下次还要删除低频词，必须删除更大词频的词了，因此min_reduce加1
 }
 
-// Create binary Huffman tree using the word counts
-// Frequent words will have short uniqe binary codes
+/**
+ * Create binary Huffman tree using the word counts
+ * Frequent words will have short uniqe binary codes
+ *
+ * 创建huffman树
+ */
 void CreateBinaryTree() {
-    long long a, b, i, min1i, min2i, pos1, pos2, point[MAX_CODE_LENGTH];
+    long long a, b, i, min1i, min2i, pos1, pos2, point[MAX_CODE_LENGTH];            // point：记录从root到word的路径
     char code[MAX_CODE_LENGTH];
     long long *count = (long long *) calloc(vocab_size * 2 + 1, sizeof(long long));
     long long *binary = (long long *) calloc(vocab_size * 2 + 1, sizeof(long long));

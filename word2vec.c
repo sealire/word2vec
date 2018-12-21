@@ -309,9 +309,21 @@ void ReduceVocab() {
  * Create binary Huffman tree using the word counts
  * Frequent words will have short uniqe binary codes
  *
- * 创建huffman树
+ * 创建huffman树，就是按词频从小到大依次构建huffman树
+ *
+ * 词库vocab是一个一维数组，词库大小为vocab_size，按词频从大到小排列词
+ * 首先创建一个一维数组：count，用于存储构建huffman树时每个节点的权重，大小为：(vocab_size * 2 + 1)，其实huffman树的节点总数=叶子节点个数+非叶子节点个数=叶子节点个数 + (叶子节点个数 - 1) = 2 * vocab_size - 1
+ *     1. 将词库中每个词的词频写进count的[0，vocab_size - 1]位置中，相当于每个叶子节点的权重，这部分权重是非递增的
+ *     2. 将count数组[vocab_size, 2*vocab_size]位置用1e15填充，相当于每个非叶子节点的权重，这部分权重是非递减的，因此count里的权重值是中间小，两边大
+ * 接下来构建huffman树主要围绕权重数组count，从count数组的中间位置开始，向两边查找数组中两个权重最小的且未处理的节点，
+ *
  */
 void CreateBinaryTree() {
+    /**
+     * 词库vocab是一个一维数组，词库大小为vocab_size，按词频从大到小排列词
+     *
+     * 首先创建一个一维数组：count，存储构建huffman树时的节点权重，大小为：(vocab_size * 2 + 1)，并将词库中每个词的词频写进count的[0，vocab_size - 1]位置中，相当于每个叶子节点的权重，这部分权重是非递增的
+     */
     long long a, b, i, min1i, min2i, pos1, pos2, point[MAX_CODE_LENGTH];            // point：记录从root到word的路径
     char code[MAX_CODE_LENGTH];
     long long *count = (long long *) calloc(vocab_size * 2 + 1, sizeof(long long));

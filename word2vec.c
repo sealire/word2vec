@@ -19,10 +19,10 @@
 #include <pthread.h>
 
 #define MAX_STRING 100                                                  			// 一个词的最大字符长度（英语：单词的字符个数，汉语：词中字个数）
-#define EXP_TABLE_SIZE 1000                                             			// 对sigmoid的函数值进行缓存，存储1000个，需要用的时候查表，x范围是[-MAX_EXP, MAX_EXP]
-#define MAX_EXP 6                                                       			// 最大计算到6 (exp^6 / (exp^6 + 1))，最小计算到-6 (exp^-6 / (exp^-6 + 1))
-#define MAX_SENTENCE_LENGTH 1000                                        			// 定义最大的句子长度(词个数)
-#define MAX_CODE_LENGTH 40                                              			// vocab_word中point域和code域最大大小，定义最长的哈夫曼编码和路径长度
+#define EXP_TABLE_SIZE 1000                                             			// 对sigmoid函数值进行缓存，存储1000个，需要用的时候查表，x范围是[-MAX_EXP, MAX_EXP]
+#define MAX_EXP 6                                                       			// sigmoid函数缓存的计算范围，最大计算到6 (exp^6 / (exp^6 + 1))，最小计算到-6 (exp^-6 / (exp^-6 + 1))
+#define MAX_SENTENCE_LENGTH 1000                                        			// 定义最大的句子长度(最大词个数)
+#define MAX_CODE_LENGTH 40                                              			// 最长的哈夫曼编码长度和路径长度，vocab_word中point域和code域最大大小
 
 const int vocab_hash_size = 30000000;                                   			// Maximum 30 * 0.7 = 21M words in the vocabulary，哈希，线性探测，开放定址法，装填系数0.7
 
@@ -36,7 +36,7 @@ struct vocab_word {																	// 词的结构体
 
 char train_file[MAX_STRING], output_file[MAX_STRING];                   			// 训练文件、输出文件名称定义
 char save_vocab_file[MAX_STRING], read_vocab_file[MAX_STRING];          			// 词汇表输出文件和词汇表读入文件名称定义
-struct vocab_word *vocab;                                               			// 声明词汇表结构体，输入文件中每个基本词的结构体数组
+struct vocab_word *vocab;                                               			// 声明词库结构体，一维数组
 
 /**
  * binary               		0则vectors.bin输出为二进制（默认），1则为文本形式
@@ -50,36 +50,36 @@ struct vocab_word *vocab;                                               			// �
 int binary = 0, cbow = 1, debug_mode = 2, window = 5, min_count = 5, num_threads = 12, min_reduce = 1;
 
 /**
- * vocab_hash           		词汇表的hash存储，下标是词的hash，内容是词在vocab中的位置，a[word_hash] = word index in vocab
+ * vocab_hash           		词汇表的hash存储，下标是词的hash，内容是词在vocab中的位置，vocab_hash[word_hash] = word index in vocab
  */
 int *vocab_hash;
 
 /**
  * vocab_max_size				词汇表的最大长度，可以扩增，每次扩1000
  * vocab_size           		词汇表的现有长度，接近vocab_max_size的时候会扩容
- * layer1_size          		隐层的节点数
+ * layer1_size          		隐层的节点数，也是词向量的维度大小
  */
 long long vocab_max_size = 1000, vocab_size = 0, layer1_size = 100;
 
 /**
  * train_words          		训练的单词总数（词频累加）
  * word_count_actual    		已经训练完的word个数
- * file_size            		训练文件大小，ftell得到
+ * file_size            		训练文件大小，ftell得到，多线程训练时会对文件进行分隔
  * classes              		输出word clusters的类别数(聚类的数目)
  */
 long long train_words = 0, word_count_actual = 0, iter = 5, file_size = 0, classes = 0;
 
 /**
- * alpha                		BP算法的学习速率，过程中自动调整
+ * alpha                		学习速率，过程中自动调整
  * starting_alpha       		初始alpha值
  * sample               		亚采样概率的参数，亚采样的目的是以一定概率拒绝高频词，使得低频词有更多出镜率，默认为0，即不进行亚采样（采样的阈值，如果一个词语在训练样本中出现的频率越大,那么就越会被采样）
  */
 real alpha = 0.025, starting_alpha, sample = 1e-3;
 
 /**
- * syn0                 		存储词典中每个词的词向量，哈夫曼树中叶子节点的词向量
- * syn1                 		哈夫曼树中非叶子节点的词向量
- * syn1neg              		负采样时，存储每个词对应的辅助向量（可以参考https://blog.csdn.net/itplus/article/details/37998797）
+ * syn0                 		存储词典中每个词的词向量，哈夫曼树中叶子节点的词向量，一维数组，第i个词的词向量为syn0[i * layer1_size, (i + 1) * layer1_size - 1]
+ * syn1                 		哈夫曼树中非叶子节点的词向量，一维数组，第i个词的词向量为syn1[i * layer1_size, (i + 1) * layer1_size - 1]
+ * syn1neg              		负采样时，存储每个词对应的辅助向量，一维数组，第i个词的词向量为syn1neg[i * layer1_size, (i + 1) * layer1_size - 1]
  * expTable             		预先存储sigmod函数结果，算法执行中查表，提前计算好，提高效率
  */
 real *syn0, *syn1, *syn1neg, *expTable;
@@ -89,11 +89,8 @@ real *syn0, *syn1, *syn1neg, *expTable;
  */
 clock_t start;
 
-/**
- * hs                   		采用hs还是ns的标志位，默认采用ng
- */
-int hs = 0, negative = 5;
-const int table_size = 1e8;                                                         // 静态采样表的规模
+int hs = 0, negative = 5;															// hs：层次归一化标志，negative：负采样标志，两个算法是混合使用的
+const int table_size = 1e8;                                                         // 静态采样表的规模，即采样点个数
 int *table;                                                                         // 采样表
 
 
@@ -203,7 +200,6 @@ int ReadWordIndex(FILE *fin, char *eof) {
 /**
  * Adds a word to the vocabulary
  * 将一个词添加到一个词汇中，返回该词在词库中的位置
- * 词不存在，把它添加到词库中，通过hash表存储。否则：词频+1
  * @param word  词
  * @return 返回添加的词在词库中的存储位置
  */

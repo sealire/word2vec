@@ -40,11 +40,11 @@ struct vocab_word *vocab;                                               			// �
 
 /**
  * binary               		训练好的词向量以什么格式输出到文件，1：二进制输出；0：文本形式输出
- * cbow                 		1使用cbow框架，0使用skip-gram框架
- * debug_mode           		大于0，加载完毕后输出汇总信息，大于1，加载训练词汇的时候输出信息，训练过程中输出信息
- * window               		窗口大小，在cbow中表示了word vector的最大的sum范围，在skip-gram中表示了max space between words（w1,w2,p(w1 | w2)）
+ * cbow                 		1：使用CBOW模型，0：使用Skip-gram模型
+ * debug_mode           		大于0，加载完毕后输出汇总信息；大于1，加载训练词汇的时候输出信息，训练过程中输出信息
+ * window               		窗口大小，在CBOW模型中表示了上下文窗口的最大范围，在Skip-gram中表示了max space between words（w1,w2,p(w1 | w2)）
  * min_count            		设置最低频率,默认是5,如果一个词语在文档中出现的次数小于5,那么就会丢弃
- * num_threads          		线程数
+ * num_threads          		训练线程数
  * min_reduce           		删除词频小于这个值的词，因为哈希表总共可以装填的词汇数是有限的，如果词典的大小N>0.7*vocab_hash_size,则从词典中删除所有词频小于min_reduce的词。
  */
 int binary = 0, cbow = 1, debug_mode = 2, window = 5, min_count = 5, num_threads = 12, min_reduce = 1;
@@ -62,8 +62,9 @@ int *vocab_hash;
 long long vocab_max_size = 1000, vocab_size = 0, layer1_size = 100;
 
 /**
- * train_words          		训练的单词总数（词频累加）
+ * train_words          		训练的词总数（词频累加），在多线程训练时，每个线程要训练的词数为train_words / num_threads
  * word_count_actual    		已经训练完的word个数
+ * iter                         每个训练线程训练迭代的次数，即每个线程对各自的语料词汇迭代训练iter次
  * file_size            		训练文件大小，ftell得到，多线程训练时会对文件进行分隔
  * classes              		表示训练好的词向量是否要进行聚类输出，0：不聚类，直接输出；大于0：聚类输出，classes也聚类个数
  */
@@ -434,7 +435,7 @@ void LearnVocabFromTrainFile() {
     while (1) {                                                                     // 从语料文件中读入每个词，添加到词库中，在读完语料文件之前，词库是未按词频排序的
         ReadWord(word, fin, &eof);                                                  // 读入一个词
         if (eof) break;                                                             // 文件结束
-        train_words++;                                                              // 词个数加1
+        train_words++;                                                              // 要训练的词总数加1
         wc++;
         if ((debug_mode > 1) && (wc >= 1000000)) {
             printf("%lldM%c", train_words / 1000000, 13);
@@ -580,12 +581,25 @@ void InitNet() {
 }
 
 /**
- * 单线程训练网络
- * @param id 线程编号[0, num_threads - 1]，不是线程号，表示num_threads个线程中的第几个线程
+ * 训练网络
+ * @param id 线程编号[0, num_threads - 1]，不是线程号，表示num_threads个线程中的第几个线程，用于分割语料文件
  * @return
+ *
+ * 多线程训练，将训练文本分成线程个数相等的份数，每个线程训练其中一份
+ * 训练按句子进行，每次从训练文件中读取一个句子，如果句子超长（超过MAX_SENTENCE_LENGTH个词），则截断
+ *
+ * 根据cbow参数决定选择CBOW模型还是Skip-gram模型，cbow=1：使用CBOW模型；cbow=0：使用Skip-gram模型。但是要注意的是不管选择哪个模型都可以混合使用hierarchical softmax和negative sampling
+ *
  */
 void *TrainModelThread(void *id) {
+    /**
+     * a：遍历对象；b：动态上下文窗口大小；d：遍历对象；word：当前词在词库中的索引；last_word：上下文词在词库中的索引；sentence_length：当前训练句子的词个数；sentence_position：当前词在句子中的位置，用于迭代句子中的词
+     */
     long long a, b, d, cw, word, last_word, sentence_length = 0, sentence_position = 0;
+
+    /**
+     * word_count：当前线程已经训练的词总数；last_word_count
+     */
     long long word_count = 0, last_word_count = 0, sen[MAX_SENTENCE_LENGTH + 1];
     long long l1, l2, c, target, label, local_iter = iter;
     unsigned long long next_random = (long long) id;
@@ -861,22 +875,27 @@ void TrainModel() {
                 for (c = 0; c < layer1_size; c++) cent[layer1_size * b + c] /= closev;
             }
 
-
+            /**
+             * 计算每个词向量到每个聚类中心的内积，内积最大表示该词向量到该聚类中心最近，因此更新该词向量的聚类类别
+             */
             for (c = 0; c < vocab_size; c++) {
                 closev = -10;
                 closeid = 0;
                 for (d = 0; d < clcn; d++) {
                     x = 0;
                     for (b = 0; b < layer1_size; b++) x += cent[layer1_size * d + b] * syn0[c * layer1_size + b];
-                    if (x > closev) {
+                    if (x > closev) {                                               // 找最近的聚类中心
                         closev = x;
                         closeid = d;
                     }
                 }
-                cl[c] = closeid;
+                cl[c] = closeid;                                                    // 更新词向量的聚类类别
             }
         }
         // Save the K-means classes
+        /**
+         * 以文本格式保存词向量和聚类类别
+         */
         for (a = 0; a < vocab_size; a++) fprintf(fo, "%s %d\n", vocab[a].word, cl[a]);
         free(centcn);
         free(cent);
@@ -974,9 +993,9 @@ int main(int argc, char **argv) {
     vocab = (struct vocab_word *) calloc(vocab_max_size, sizeof(struct vocab_word));
     vocab_hash = (int *) calloc(vocab_hash_size, sizeof(int));
     expTable = (real *) malloc((EXP_TABLE_SIZE + 1) * sizeof(real));
-    for (i = 0; i < EXP_TABLE_SIZE; i++) {											// 预处理，提前计算sigmod值，并保存起来
-        expTable[i] = exp((i / (real) EXP_TABLE_SIZE * 2 - 1) * MAX_EXP);			// Precompute the exp() table
-        expTable[i] = expTable[i] / (expTable[i] + 1);								// Precompute f(x) = x / (x + 1)
+    for (i = 0; i < EXP_TABLE_SIZE; i++) {                                          // 预处理，提前计算sigmod值，并保存起来
+        expTable[i] = exp((i / (real) EXP_TABLE_SIZE * 2 - 1) * MAX_EXP);           // 计算e^x
+        expTable[i] = expTable[i] / (expTable[i] + 1);                              // f(x) = 1 / (1 + e^(-x)) = e^x / (1 + e^x)
     }
     TrainModel();
     return 0;

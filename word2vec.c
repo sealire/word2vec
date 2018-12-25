@@ -34,12 +34,12 @@ struct vocab_word {																	// 词的结构体
     char *word, *code, codelen;														// 分别对应着：词，哈夫曼编码，编码长度
 };
 
-char train_file[MAX_STRING], output_file[MAX_STRING];                   			// 训练文件、输出文件名称定义
-char save_vocab_file[MAX_STRING], read_vocab_file[MAX_STRING];          			// 词汇表输出文件和词汇表读入文件名称定义
+char train_file[MAX_STRING], output_file[MAX_STRING];                   			// train_file：训练语料文件，output_file：词向量输出文件
+char save_vocab_file[MAX_STRING], read_vocab_file[MAX_STRING];          			// save_vocab_file：词汇表输出文件，read_vocab_file：词汇表读入文件
 struct vocab_word *vocab;                                               			// 声明词库结构体，一维数组
 
 /**
- * binary               		0则vectors.bin输出为二进制（默认），1则为文本形式
+ * binary               		训练好的词向量以什么格式输出到文件，1：二进制输出；0：文本形式输出
  * cbow                 		1使用cbow框架，0使用skip-gram框架
  * debug_mode           		大于0，加载完毕后输出汇总信息，大于1，加载训练词汇的时候输出信息，训练过程中输出信息
  * window               		窗口大小，在cbow中表示了word vector的最大的sum范围，在skip-gram中表示了max space between words（w1,w2,p(w1 | w2)）
@@ -65,7 +65,7 @@ long long vocab_max_size = 1000, vocab_size = 0, layer1_size = 100;
  * train_words          		训练的单词总数（词频累加）
  * word_count_actual    		已经训练完的word个数
  * file_size            		训练文件大小，ftell得到，多线程训练时会对文件进行分隔
- * classes              		输出word clusters的类别数(聚类的数目)
+ * classes              		表示训练好的词向量是否要进行聚类输出，0：不聚类，直接输出；大于0：聚类输出，classes也聚类个数
  */
 long long train_words = 0, word_count_actual = 0, iter = 5, file_size = 0, classes = 0;
 
@@ -399,7 +399,7 @@ void CreateBinaryTree() {
         i = 0;																		// i：记录哈夫曼路径的长度，即节点个数，但不包括根节点
         while (1) {																	// 沿沿着父节点路径，记录哈夫曼编码和路径，直到根节点
             code[i] = binary[b];													// 记录哈夫曼编码
-            point[i] = b;															// 记录路径，point[0] = a < vocab_size，记录路径，point[i] = b >= vocab_size
+            point[i] = b;															// 记录路径，注意，这时point数组里记录的路径是逆序的，point[0] = a < vocab_size，记录路径，point[i] = b >= vocab_size
             i++;																	// 路径长度加1
             b = parent_node[b];														// 找下一个父节点
             if (b == vocab_size * 2 - 2) break;										// vocab_size * 2 - 2为根节点下标位置，找到根节点时，该词的哈夫曼编码和路径即已记录到code和point中，但顺序是逆序的
@@ -417,46 +417,49 @@ void CreateBinaryTree() {
 }
 
 /**
- * 从文件训练词
+ * 从原始语料文件读入每个词，构建词库
  */
 void LearnVocabFromTrainFile() {
     char word[MAX_STRING], eof = 0;
     FILE *fin;
-    long long a, i, wc = 0;
-    for (a = 0; a < vocab_hash_size; a++) vocab_hash[a] = -1;
-    fin = fopen(train_file, "rb");
+    long long a, i, wc = 0;                                                         // wc：debug_mode模式中，每读入1000000个词输出一次信息
+    for (a = 0; a < vocab_hash_size; a++) vocab_hash[a] = -1;                       // 清空词的hash映射
+    fin = fopen(train_file, "rb");                                                  // 打开语料文件
     if (fin == NULL) {
         printf("ERROR: training data file not found!\n");
         exit(1);
     }
-    vocab_size = 0;
-    AddWordToVocab((char *) "</s>");
-    while (1) {
-        ReadWord(word, fin, &eof);
-        if (eof) break;
-        train_words++;
+    vocab_size = 0;                                                                 // 初始词库大小为0
+    AddWordToVocab((char *) "</s>");                                                // 将</s>加入到词库第一个位置，
+    while (1) {                                                                     // 从语料文件中读入每个词，添加到词库中，在读完语料文件之前，词库是未按词频排序的
+        ReadWord(word, fin, &eof);                                                  // 读入一个词
+        if (eof) break;                                                             // 文件结束
+        train_words++;                                                              // 词个数加1
         wc++;
         if ((debug_mode > 1) && (wc >= 1000000)) {
             printf("%lldM%c", train_words / 1000000, 13);
             fflush(stdout);
             wc = 0;
         }
-        i = SearchVocab(word);
-        if (i == -1) {
+        i = SearchVocab(word);                                                      // 查找该词是否已经在词库中，若不存在，添加；若已经存在，词频加1
+        if (i == -1) {                                                              // 添加新词，词频为1
             a = AddWordToVocab(word);
             vocab[a].cn = 1;
-        } else vocab[i].cn++;
-        if (vocab_size > vocab_hash_size * 0.7) ReduceVocab();
+        } else vocab[i].cn++;                                                       // 词已经在词库中，词频加1
+        if (vocab_size > vocab_hash_size * 0.7) ReduceVocab();                      // 每添加一个次，判断一次词库大小，若大于填充因子允许的词数，删除一次低频词
     }
-    SortVocab();
+    SortVocab();                                                                    // 读完语料文件后，对词库进行一次按词频排序，并删除低频词
     if (debug_mode > 0) {
         printf("Vocab size: %lld\n", vocab_size);
         printf("Words in train file: %lld\n", train_words);
     }
-    file_size = ftell(fin);
+    file_size = ftell(fin);                                                         // 获取位置标识符的当前值，即文件字符数，用于多线程训练
     fclose(fin);
 }
 
+/**
+ * 保存词汇表文件，词 + 词频
+ */
 void SaveVocab() {
     long long i;
     FILE *fo = fopen(save_vocab_file, "wb");
@@ -464,75 +467,123 @@ void SaveVocab() {
     fclose(fo);
 }
 
+/**
+ * 从词汇表文件中读入词，构建词库
+ * 词汇表文件每行按（词 词频）的格式存储。
+ *
+ * 并获取要训练的语料文件的文件字符数
+ */
 void ReadVocab() {
     long long a, i = 0;
     char c, eof = 0;
     char word[MAX_STRING];
-    FILE *fin = fopen(read_vocab_file, "rb");
+    FILE *fin = fopen(read_vocab_file, "rb");                                       // 打开词汇表文件
     if (fin == NULL) {
         printf("Vocabulary file not found\n");
         exit(1);
     }
-    for (a = 0; a < vocab_hash_size; a++) vocab_hash[a] = -1;
-    vocab_size = 0;
-    while (1) {
-        ReadWord(word, fin, &eof);
-        if (eof) break;
-        a = AddWordToVocab(word);
-        fscanf(fin, "%lld%c", &vocab[a].cn, &c);
+    for (a = 0; a < vocab_hash_size; a++) vocab_hash[a] = -1;                       // 清空词的hash映射
+    vocab_size = 0;                                                                 // 初始词库大小为0
+    while (1) {                                                                     // 从语料文件中读入每个词，添加到词库中
+        ReadWord(word, fin, &eof);                                                  // 读入一个词到word
+        if (eof) break;                                                             // 文件结束
+        a = AddWordToVocab(word);                                                   // 添加到词库中
+        fscanf(fin, "%lld%c", &vocab[a].cn, &c);                                    // 读入词频，&c用于读入每行最后的换行符，利于读取下一行的词
         i++;
     }
-    SortVocab();
+    SortVocab();                                                                    // 读完文件后，对词库进行一次按词频排序，并删除低频词
     if (debug_mode > 0) {
         printf("Vocab size: %lld\n", vocab_size);
         printf("Words in train file: %lld\n", train_words);
     }
-    fin = fopen(train_file, "rb");
+    fin = fopen(train_file, "rb");                                                  // 打开还要训练的语料文件
     if (fin == NULL) {
         printf("ERROR: training data file not found!\n");
         exit(1);
     }
-    fseek(fin, 0, SEEK_END);
-    file_size = ftell(fin);
+    fseek(fin, 0, SEEK_END);                                                        // 设置位置标识符到文件结尾
+    file_size = ftell(fin);                                                         // 获取位置标识符的当前值，即文件字符数，用于多线程训练
     fclose(fin);
 }
 
+/**
+ * 初始化训练网络
+ *
+ * 词向量：syn0，[-0.5/layer1_size, 0.5/layer1_size]范围的初始化，layer1_size为词向量的维度大小
+ * 层次归一化，哈夫曼树的非叶子节点词向量：syn1，零初始化
+ * 负采样的词向量：syn1neg，零初始化
+ *
+ * 最后创建huffman树
+ */
 void InitNet() {
     long long a, b;
     unsigned long long next_random = 1;
+    /**
+     * vocab_size个词，第个词的向量维度为layer1_size
+     */
     a = posix_memalign((void **) &syn0, 128, (long long) vocab_size * layer1_size * sizeof(real));
     if (syn0 == NULL) {
         printf("Memory allocation failed\n");
         exit(1);
     }
+    /**
+     * 层次归一化
+     */
     if (hs) {
+        /**
+         * vocab_size个词，第个词的向量维度为layer1_size
+         */
         a = posix_memalign((void **) &syn1, 128, (long long) vocab_size * layer1_size * sizeof(real));
         if (syn1 == NULL) {
             printf("Memory allocation failed\n");
             exit(1);
         }
+        /**
+         * 零初始化
+         */
         for (a = 0; a < vocab_size; a++)
             for (b = 0; b < layer1_size; b++)
                 syn1[a * layer1_size + b] = 0;
     }
+    /**
+     * 负采样
+     */
     if (negative > 0) {
+        /**
+         * vocab_size个词，第个词的向量维度为layer1_size
+         */
         a = posix_memalign((void **) &syn1neg, 128, (long long) vocab_size * layer1_size * sizeof(real));
         if (syn1neg == NULL) {
             printf("Memory allocation failed\n");
             exit(1);
         }
+        /**
+         * 零初始化
+         */
         for (a = 0; a < vocab_size; a++)
             for (b = 0; b < layer1_size; b++)
                 syn1neg[a * layer1_size + b] = 0;
     }
+    /**
+     * 词向量用[-0.5/layer1_size, 0.5/layer1_size]范围的数组初始化
+     */
     for (a = 0; a < vocab_size; a++)
         for (b = 0; b < layer1_size; b++) {
             next_random = next_random * (unsigned long long) 25214903917 + 11;
             syn0[a * layer1_size + b] = (((next_random & 0xFFFF) / (real) 65536) - 0.5) / layer1_size;
         }
+
+    /**
+     * 创建huffman树
+     */
     CreateBinaryTree();
 }
 
+/**
+ * 单线程训练网络
+ * @param id 线程编号[0, num_threads - 1]，不是线程号，表示num_threads个线程中的第几个线程
+ * @return
+ */
 void *TrainModelThread(void *id) {
     long long a, b, d, cw, word, last_word, sentence_length = 0, sentence_position = 0;
     long long word_count = 0, last_word_count = 0, sen[MAX_SENTENCE_LENGTH + 1];
@@ -724,54 +775,93 @@ void *TrainModelThread(void *id) {
     pthread_exit(NULL);
 }
 
+/**
+ * 训练模型，多线程训练
+ */
 void TrainModel() {
     long a, b, c, d;
     FILE *fo;
-    pthread_t *pt = (pthread_t *) malloc(num_threads * sizeof(pthread_t));			// 创建多线程
+    pthread_t *pt = (pthread_t *) malloc(num_threads * sizeof(pthread_t));			// 创建num_threads个线程
     printf("Starting training using file %s\n", train_file);
-    starting_alpha = alpha;															// 记录初始学习率
-    if (read_vocab_file[0] != 0) ReadVocab(); else LearnVocabFromTrainFile();		// 优先从词汇表文件中加载，否则从训练文件中加载
-    if (save_vocab_file[0] != 0) SaveVocab();										// 输出词汇表文件，词+词频
-    if (output_file[0] == 0) return;
-    InitNet();																		// 网络结构初始化
-    if (negative > 0) InitUnigramTable();
-    start = clock();
+    starting_alpha = alpha;															// 记录初始学习率，学习率会随着训练衰减，衰减到一定程度后不再衰减
+    if (read_vocab_file[0] != 0) ReadVocab(); else LearnVocabFromTrainFile();		// 优先从已经词汇表文件中加载，否则从训练语料文件中加载词汇
+    if (save_vocab_file[0] != 0) SaveVocab();										// 输出词汇表文件，词 + 词频
+    if (output_file[0] == 0) return;                                                // 未设置词向量输出文件，直接退出
+    InitNet();																		// 网络结构初始化，初始化词向量、哈夫曼树
+    if (negative > 0) InitUnigramTable();                                           // 负采样，初始化负采样表
+    start = clock();                                                                // 记录CPU时间
+
+    /**
+     * 创建num_threads个训练线程，线程函数的参数是线程编号
+     */
     for (a = 0; a < num_threads; a++) pthread_create(&pt[a], NULL, TrainModelThread, (void *) a);
+
+    /**
+     * 开始训练并阻塞等待每个线程结束，全部线程结束即训练完成
+     */
     for (a = 0; a < num_threads; a++) pthread_join(pt[a], NULL);
-    fo = fopen(output_file, "wb");
-    if (classes == 0) {
+
+    /**
+     * 全部线程训练完成后，将训练好的词向量输出到output_file文件
+     */
+    fo = fopen(output_file, "wb");                                                  // 打开词向量输出文件
+    if (classes == 0) {                                                             // classes表示是否对词向量进行聚类，0：表示不聚类，直接输出；1：表示按K均值聚类后输出
         // Save the word vectors
         fprintf(fo, "%lld %lld\n", vocab_size, layer1_size);
-        for (a = 0; a < vocab_size; a++) {
+        for (a = 0; a < vocab_size; a++) {                                          // 遍历词库的每个词，将词的词向量输出到文件
             fprintf(fo, "%s ", vocab[a].word);
+
+            /**
+             * 输出每个词向量每个维度值
+             * binary用于判断以是否以二进制输出，1：二进制输出，0：文本输出
+             */
             if (binary) for (b = 0; b < layer1_size; b++) fwrite(&syn0[a * layer1_size + b], sizeof(real), 1, fo);
             else for (b = 0; b < layer1_size; b++) fprintf(fo, "%lf ", syn0[a * layer1_size + b]);
             fprintf(fo, "\n");
         }
     } else {
+        /**
+         * 先按K均值聚类后，再输出词向量，classes：表示聚类个数
+         */
+
         // Run K-means on the word vectors
-        int clcn = classes, iter = 10, closeid;
-        int *centcn = (int *) malloc(classes * sizeof(int));
-        int *cl = (int *) calloc(vocab_size, sizeof(int));
-        real closev, x;
-        real *cent = (real *) calloc(classes * layer1_size, sizeof(real));
-        for (a = 0; a < vocab_size; a++) cl[a] = a % clcn;
-        for (a = 0; a < iter; a++) {
-            for (b = 0; b < clcn * layer1_size; b++) cent[b] = 0;
-            for (b = 0; b < clcn; b++) centcn[b] = 1;
+        int clcn = classes, iter = 10, closeid;                                     // clcn：聚类个数，iter：迭代次数，closeid：表示某个词最近的类编号
+        int *centcn = (int *) malloc(classes * sizeof(int));                        // 每个类的词汇个数，一维数组
+        int *cl = (int *) calloc(vocab_size, sizeof(int));                          // 每个词对应的类编号，一维数组
+        real closev, x;                                                             // x：词向量和类中心的内积，值越大说明距离越近；closev：最大的内积，即距离最近
+        real *cent = (real *) calloc(classes * layer1_size, sizeof(real));          // 每个类的聚类中心，一维数组，第i个类的中心为cent[i * layer1_size, (i + 1) * layer1_size - 1]
+        for (a = 0; a < vocab_size; a++) cl[a] = a % clcn;                          // 初始化每个词的类编号，即初始聚类
+        for (a = 0; a < iter; a++) {                                                // 迭代iter次，每次迭代重新进行一次聚类，并计算新的聚类中心
+            for (b = 0; b < clcn * layer1_size; b++) cent[b] = 0;                   // 每次迭代开始，设置每个聚类中心为0
+            for (b = 0; b < clcn; b++) centcn[b] = 1;                               // 每次迭代开始，设置每个类的词汇个数为1
+
+            /**
+             * 重新计算每个类的聚类中心和词汇个数，这个“聚类中心”并不是真正的中心，这一阶段是累加“中心”的每个分量，后面会计算真正的中心，将“聚类中心”的每个分量除以类中词汇个数才是真正的中心
+             */
             for (c = 0; c < vocab_size; c++) {
                 for (d = 0; d < layer1_size; d++) cent[layer1_size * cl[c] + d] += syn0[c * layer1_size + d];
-                centcn[cl[c]]++;
+                centcn[cl[c]]++;                                                    // 每个类的词汇累加
             }
+
+
+            /**
+             * 将上面累加的“聚类中心”除以各个类的词汇个数，得到真正的聚类中心，并将中心向量归一化
+             */
             for (b = 0; b < clcn; b++) {
                 closev = 0;
                 for (c = 0; c < layer1_size; c++) {
-                    cent[layer1_size * b + c] /= centcn[b];
-                    closev += cent[layer1_size * b + c] * cent[layer1_size * b + c];
+                    cent[layer1_size * b + c] /= centcn[b];                         // “聚类中心”的每个分量除以词汇个数得到真正的聚类中心
+                    closev += cent[layer1_size * b + c] * cent[layer1_size * b + c];// 累加聚类中心每个分量的平方，用于计算聚类中心向量的长度
                 }
-                closev = sqrt(closev);
+                closev = sqrt(closev);                                              // 计算计算聚类中心向量的长度
+
+                /**
+                 * 聚类中心向量归一化，方便计算每个词向量到各个聚类中心的距离
+                 */
                 for (c = 0; c < layer1_size; c++) cent[layer1_size * b + c] /= closev;
             }
+
+
             for (c = 0; c < vocab_size; c++) {
                 closev = -10;
                 closeid = 0;

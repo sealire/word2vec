@@ -30,7 +30,7 @@ typedef float real;                                                             
 
 struct vocab_word {                                                                 // 词的结构体
     long long cn;                                                                   // 词频，来自于vocab file或者从训练模型中来计算
-    int *point;                                                                     // 哈夫曼树中从根节点到该词的路径，存放路径上每个非叶结点的索引
+    int *point;                                                                     // 哈夫曼树中从根节点到该词的路径，存放路径上每个非叶子结点的索引
     char *word, *code, codelen;                                                     // 分别对应着：词，哈夫曼编码，编码长度
 };
 
@@ -585,7 +585,7 @@ void InitNet() {
  * @param id 线程编号[0, num_threads - 1]，不是线程号，表示num_threads个线程中的第几个线程，用于分割语料文件
  * @return
  *
- * 多线程训练，将训练文本分成线程个数相等的份数，每个线程训练其中一份
+ * 多线程训练，将训练文本分成线程个数相等的份数，每个线程训练其中一份，每个线程对分配到的句子迭代训练iter次
  * 训练按句子进行，每次从训练文件中读取一个句子，如果句子超长（超过MAX_SENTENCE_LENGTH个词），则截断
  *
  * 根据cbow参数决定选择CBOW模型还是Skip-gram模型，cbow=1：使用CBOW模型；cbow=0：使用Skip-gram模型。但是要注意的是不管选择哪个模型都可以混合使用hierarchical softmax和negative sampling
@@ -593,14 +593,32 @@ void InitNet() {
  */
 void *TrainModelThread(void *id) {
     /**
-     * a：遍历对象；b：动态上下文窗口大小；d：遍历对象；word：当前词在词库中的索引；last_word：上下文词在词库中的索引；sentence_length：当前训练句子的词个数；sentence_position：当前词在句子中的位置，用于迭代句子中的词
+     * a：                       遍历对象
+     * b：                       动态上下文窗口大小
+     * d：                       遍历对象
+     * word：                    当前词在词库中的索引
+     * last_word：               上下文词在词库中的索引
+     * sentence_length：         当前训练句子的词个数
+     * sentence_position：       当前词在句子中的位置，用于迭代句子中的词
      */
     long long a, b, d, cw, word, last_word, sentence_length = 0, sentence_position = 0;
 
     /**
-     * word_count：当前线程已经训练的词总数；last_word_count
+     * word_count：              当前线程已经训练的词总数
+     * last_word_count：         上一次记录的已经训练的词总数，用于衰减学习率，每训练10000个词衰减一次
+     * sen：                     当前待训练的句子，存储每个词在词库中的索引
      */
     long long word_count = 0, last_word_count = 0, sen[MAX_SENTENCE_LENGTH + 1];
+
+
+    /**
+     * l1：                      在Skip-gram模型中，在syn0中定位上下文词词向量的起始位置
+     * l2：                      hierarchical softmax时为在syn0中定位非叶子节点词词向量的起始位置，negative sampling时为在syn1neg中定位采样点（包括正负样本）词词向量的起始位置
+     * c：                       迭代对象
+     * target：                  negative sampling时表示采样点（包括正负样本）词在词库中的索引
+     * label：                   negative sampling时表示样本标签，1：正样本；0：负样本
+     * local_iter：              训练剩余迭代次数，一共迭代iter次
+     */
     long long l1, l2, c, target, label, local_iter = iter;
     unsigned long long next_random = (long long) id;
     char eof = 0;

@@ -66,7 +66,7 @@ long long vocab_max_size = 1000, vocab_size = 0, layer1_size = 100;
  * word_count_actual            已经训练完的词频总数，因为训练迭代次数为iter次，所以最终word_count_actual = iter * train_words（因为训练时要分割训练文件，词可能被分割，因此可能会不相等，但删除低频词后，一般还是会相等）
  * iter                         每个训练线程训练迭代的次数，即每个线程对各自分配到的语料迭代训练iter次
  * file_size                    训练文件大小，ftell得到，多线程训练时会对文件进行分隔，用于定位每个训练线程开始训练的文件位置
- * classes                      表示训练好的词向量是否进行聚类输出，0：不聚类，直接输出；大于0：聚类输出，classes也是聚类个数，与binary共同控制词向量结果输出
+ * classes                      表示训练好的词向量是否聚类输出，0：不聚类，直接输出；大于0：聚类输出，classes也是聚类个数，与binary共同控制词向量结果输出
  */
 long long train_words = 0, word_count_actual = 0, iter = 5, file_size = 0, classes = 0;
 

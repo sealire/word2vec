@@ -796,7 +796,7 @@ void *TrainModelThread(void *id) {
                             if (target == word) continue;                                          // 采样到当前词，跳过
                             label = 0;                                                             // 负样本标签为0
                         }
-                        l2 = target * layer1_size;                                                 // 计算负样本词向量在syn1neg的开始位置
+                        l2 = target * layer1_size;                                                 // 计算样本词向量在syn1neg的开始位置
                         f = 0;
                         for (c = 0; c < layer1_size; c++) f += neu1[c] * syn1neg[c + l2];          // 上下文词向量加和向量（已被平均） 与 负样本词向量 做内积
 						
@@ -885,18 +885,18 @@ void *TrainModelThread(void *id) {
                     if (negative > 0)
                         for (d = 0; d < negative + 1; d++) {
                             if (d == 0) {
-                                target = word;
-                                label = 1;
+                                target = word;                                                     // 当前词为正样本
+                                label = 1;                                                         // 正样本标签为1
                             } else {
                                 next_random = next_random * (unsigned long long) 25214903917 + 11;
-                                target = table[(next_random >> 16) % table_size];
-                                if (target == 0) target = next_random % (vocab_size - 1) + 1;
-                                if (target == word) continue;
-                                label = 0;
+                                target = table[(next_random >> 16) % table_size];                  // 负采样
+                                if (target == 0) target = next_random % (vocab_size - 1) + 1;      // 采样到换行符，再采样一次
+                                if (target == word) continue;                                      // 采样到当前词，跳过
+                                label = 0;                                                         // 负样本标签为0
                             }
-                            l2 = target * layer1_size;
+                            l2 = target * layer1_size;                                             // 计算样本词向量在syn1neg的开始位置
                             f = 0;
-                            for (c = 0; c < layer1_size; c++) f += syn0[c + l1] * syn1neg[c + l2];
+                            for (c = 0; c < layer1_size; c++) f += syn0[c + l1] * syn1neg[c + l2]; // 上下文词向量加和向量（已被平均） 与 负样本词向量 做内积
                             if (f > MAX_EXP) g = (label - 1) * alpha;
                             else if (f < -MAX_EXP) g = (label - 0) * alpha;
                             else g = (label - expTable[(int) ((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))]) * alpha;

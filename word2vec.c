@@ -21,52 +21,52 @@
 #define MAX_STRING 100                                                                             // 一个词的最大字符长度（英语：单词的字符个数，汉语：词中字个数）
 #define EXP_TABLE_SIZE 1000                                                                        // 对sigmoid函数值进行缓存，存储1000个，需要用的时候查表，x范围是[-MAX_EXP, MAX_EXP]
 #define MAX_EXP 6                                                                                  // sigmoid函数缓存的计算范围，最大计算到6 (exp^6 / (exp^6 + 1))，最小计算到-6 (exp^-6 / (exp^-6 + 1))
-#define MAX_SENTENCE_LENGTH 1000                                                                   // 定义最大的句子长度(最大词个数)
+#define MAX_SENTENCE_LENGTH 1000                                                                   // 定义句子的最大长度（最大词个数）
 #define MAX_CODE_LENGTH 40                                                                         // 最长的哈夫曼编码长度和路径长度，vocab_word中point域和code域最大大小
 
-const int vocab_hash_size = 30000000;                                                              // Maximum 30 * 0.7 = 21M words in the vocabulary，哈希，线性探测，开放定址法，装填系数0.7
+const int vocab_hash_size = 30000000;                                                              // Maximum 30 * 0.7 = 21M words in the vocabulary，词库哈希表大小，装填系数为0.7，用线性探测解决哈希冲突
 
 typedef float real;                                                                                // Precision of float numbers
 
-struct vocab_word {                                                                                // 词的结构体
-    long long cn;                                                                                  // 词频，来自于vocab file或者从训练模型中来计算
-    int *point;                                                                                    // 哈夫曼树中从根节点到该词的路径，存放路径上每个非叶子结点的索引
-    char *word, *code, codelen;                                                                    // 分别对应着：词，哈夫曼编码，编码长度
+struct vocab_word {                                                                                // 词的结构体，存储包括词本身、词频、哈夫曼编码、编码长度、哈夫曼路径
+    long long cn;                                                                                  // 词频
+    int *point;                                                                                    // 哈夫曼树中从根节点到该词的路径，路径的索引要特别注意，在下面的构建哈夫曼树中会说明
+    char *word, *code, codelen;                                                                    // 分别是：词，哈夫曼编码，编码长度
 };
 
-char train_file[MAX_STRING], output_file[MAX_STRING];                                              // train_file：训练语料文件，output_file：词向量输出文件
-char save_vocab_file[MAX_STRING], read_vocab_file[MAX_STRING];                                     // save_vocab_file：词汇表输出文件，read_vocab_file：词汇表读入文件
-struct vocab_word *vocab;                                                                          // 声明词库结构体，一维数组
+char train_file[MAX_STRING], output_file[MAX_STRING];                                              // train_file：要训练的语料文件，按句子组织；output_file：训练后词向量的输出文件
+char save_vocab_file[MAX_STRING], read_vocab_file[MAX_STRING];                                     // save_vocab_file：词库输出文件；read_vocab_file：词库读入文件。这两个文件是词库的输入和输出，而上面两个文件是语料读入文件和词向量保存文件
+struct vocab_word *vocab;                                                                          // 词库数组，一维数组
 
 /**
- * binary                       训练好的词向量以什么格式输出到文件，1：二进制输出；0：文本形式输出
+ * binary                       训练好的词向量以什么格式输出到文件，1：二进制输出；0：文本形式输出。下面还有一个classes变量，输出结果classes和binary共同控制，若classes = 0，由binary控制；若classes > 0，聚类输出（这时只输出词和聚类类别，不输出词向量）
  * cbow                         1：使用CBOW模型，0：使用Skip-gram模型
- * debug_mode                   大于0，加载完毕后输出汇总信息；大于1，加载训练词汇的时候输出信息，训练过程中输出信息
- * window                       窗口大小，在CBOW模型中表示了上下文窗口的最大范围，在Skip-gram中表示了max space between words（w1,w2,p(w1 | w2)）
- * min_count                    设置最低频率,默认是5,如果一个词语在文档中出现的次数小于5,那么就会丢弃
- * num_threads                  训练线程数
- * min_reduce                   删除词频小于这个值的词，因为哈希表总共可以装填的词汇数是有限的，如果词典的大小N>0.7*vocab_hash_size,则从词典中删除所有词频小于min_reduce的词。
+ * debug_mode                   用于输出一些进度信息
+ * window                       上下文窗口大小，实际使用的是动态窗口，大小为[0, window]
+ * min_count                    最小词频
+ * num_threads                  训练线程数，多线程训练
+ * min_reduce                   最小词频
  */
 int binary = 0, cbow = 1, debug_mode = 2, window = 5, min_count = 5, num_threads = 12, min_reduce = 1;
 
 /**
- * vocab_hash                   词汇表的hash存储，下标是词的hash，内容是词在vocab中的位置，vocab_hash[word_hash] = word index in vocab
+ * vocab_hash                   词库的hash表，将词按hash映射到词库，vocab_hash[word_hash] = 词在词库的位置，在建立词库时用，目的是，训练时不会用到
  */
 int *vocab_hash;
 
 /**
- * vocab_max_size               词汇表的最大长度，可以扩增，每次扩1000
- * vocab_size                   词汇表的现有长度，接近vocab_max_size的时候会扩容
- * layer1_size                  隐层的节点数，也是词向量的维度大小
+ * vocab_max_size               词库规模（词库容量），在建立词库的过程中，当词库规模到达vocab_max_size时会对词库扩容，每次扩增vocab_max_size个容量
+ * vocab_size                   词库中实际的词个数
+ * layer1_size                  词向量的维度大小（也是隐藏层的大小）
  */
 long long vocab_max_size = 1000, vocab_size = 0, layer1_size = 100;
 
 /**
- * train_words                  要训练的词总数（词频累加），在多线程训练时，每个线程要训练的词数平均是train_words / num_threads
+ * train_words                  要训练的词总数（词频累加，但不包含低频词），在多线程训练时，每个线程要训练的词数是train_words / num_threads
  * word_count_actual            已经训练完的词频总数，因为训练迭代次数为iter次，所以最终word_count_actual = iter * train_words（因为训练时要分割训练文件，词可能被分割，因此可能会不相等，但删除低频词后，一般还是会相等）
- * iter                         每个训练线程训练迭代的次数，即每个线程对各自的语料词汇迭代训练iter次
- * file_size                    训练文件大小，ftell得到，多线程训练时会对文件进行分隔
- * classes                      表示训练好的词向量是否要进行聚类输出，0：不聚类，直接输出；大于0：聚类输出，classes也聚类个数
+ * iter                         每个训练线程训练迭代的次数，即每个线程对各自分配到的语料迭代训练iter次
+ * file_size                    训练文件大小，ftell得到，多线程训练时会对文件进行分隔，用于定位每个训练线程开始训练的文件位置
+ * classes                      表示训练好的词向量是否进行聚类输出，0：不聚类，直接输出；大于0：聚类输出，classes也是聚类个数，与binary共同控制词向量结果输出
  */
 long long train_words = 0, word_count_actual = 0, iter = 5, file_size = 0, classes = 0;
 
@@ -897,18 +897,23 @@ void *TrainModelThread(void *id) {
                             l2 = target * layer1_size;                                             // 计算样本词向量在syn1neg的开始位置
                             f = 0;
                             for (c = 0; c < layer1_size; c++) f += syn0[c + l1] * syn1neg[c + l2]; // 上下文词向量加和向量（已被平均） 与 负样本词向量 做内积
+
+                            /**
+                             * 从缓存中读取sigmod值，并计算梯度与学习率的乘积
+                             */
                             if (f > MAX_EXP) g = (label - 1) * alpha;
                             else if (f < -MAX_EXP) g = (label - 0) * alpha;
                             else g = (label - expTable[(int) ((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))]) * alpha;
-                            for (c = 0; c < layer1_size; c++) neu1e[c] += g * syn1neg[c + l2];
-                            for (c = 0; c < layer1_size; c++) syn1neg[c + l2] += g * syn0[c + l1];
+
+                            for (c = 0; c < layer1_size; c++) neu1e[c] += g * syn1neg[c + l2];     // 累加词向量的修正量，这里遍历了每个样本点（包括正负样本），先对修正值进行累加，下面会更新到上下文词的词向量中
+                            for (c = 0; c < layer1_size; c++) syn1neg[c + l2] += g * syn0[c + l1]; // 更新负样本的词向量
                         }
                     // Learn weights input -> hidden
-                    for (c = 0; c < layer1_size; c++) syn0[c + l1] += neu1e[c];
+                    for (c = 0; c < layer1_size; c++) syn0[c + l1] += neu1e[c];                    // 更新上下文件词的词向量
                 }
         }
-        sentence_position++;
-        if (sentence_position >= sentence_length) {
+        sentence_position++;                                                                       // 训练句子中的下一个词
+        if (sentence_position >= sentence_length) {                                                // 当前句子训练完成，训练下一个句子
             sentence_length = 0;
             continue;
         }
@@ -935,15 +940,8 @@ void TrainModel() {
     if (negative > 0) InitUnigramTable();                                                          // 负采样，初始化负采样表
     start = clock();                                                                               // 记录CPU时间
 
-    /**
-     * 创建num_threads个训练线程，线程函数的参数是线程编号
-     */
-    for (a = 0; a < num_threads; a++) pthread_create(&pt[a], NULL, TrainModelThread, (void *) a);
-
-    /**
-     * 开始训练并阻塞等待每个线程结束，全部线程结束即训练完成
-     */
-    for (a = 0; a < num_threads; a++) pthread_join(pt[a], NULL);
+    for (a = 0; a < num_threads; a++) pthread_create(&pt[a], NULL, TrainModelThread, (void *) a);  // 创建num_threads个训练线程，线程函数的参数是线程编号
+    for (a = 0; a < num_threads; a++) pthread_join(pt[a], NULL);                                   // 开始训练并阻塞等待每个线程结束，全部线程结束即训练完成
 
     /**
      * 全部线程训练完成后，将训练好的词向量输出到output_file文件
@@ -998,11 +996,7 @@ void TrainModel() {
                     closev += cent[layer1_size * b + c] * cent[layer1_size * b + c];               // 累加聚类中心每个分量的平方，用于计算聚类中心向量的长度
                 }
                 closev = sqrt(closev);                                                             // 计算计算聚类中心向量的长度
-
-                /**
-                 * 聚类中心向量归一化，方便计算每个词向量到各个聚类中心的距离
-                 */
-                for (c = 0; c < layer1_size; c++) cent[layer1_size * b + c] /= closev;
+                for (c = 0; c < layer1_size; c++) cent[layer1_size * b + c] /= closev;             // 聚类中心向量归一化，方便计算每个词向量到各个聚类中心的距离
             }
 
             /**

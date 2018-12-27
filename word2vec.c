@@ -141,16 +141,16 @@ void InitUnigramTable() {
     d1 = pow(vocab[i].cn, power) / train_words_pow;                                                // 第一个词的线段比例
     for (a = 0; a < table_size; a++) {                                                             // 遍历采样点
         
-		/**
-		 * 收集当前词到负样本集
-		 * 注意：在数学上，该行代码逻辑不严谨，逻辑上并没有做到均匀采样，但可以采集到在词库上从左到右扫描过的每一个词，包括低频词
-		 * 
-		 * 当词i的词频比例很小时，小到没有任何采样点落在该词上，这时本不应该采样该词，但该行代码也会将其采样
-		 * 当词库和负采样规模相当，甚至更大时，该问题会凸显，当负采样规模远大于词库规模时，该问题可以得到控制，即增大了采样密度，放大了词的分辨率
-		 *
-		 * 若要严格均匀采样，该行代码应该改为是：if (a / (double) table_size < d1) table[a] = i;  即保证采样点落在该词内才将其采样（边缘上为下一个词）
-		 */
-		table[a] = i;
+        /**
+         * 收集当前词到负样本集
+         * 注意：在数学上，该行代码逻辑不严谨，逻辑上并没有做到均匀采样，但可以采集到在词库上从左到右扫描过的每一个词，包括低频词
+         * 
+         * 当词i的词频比例很小时，小到没有任何采样点落在该词上，这时本不应该采样该词，但该行代码也会将其采样
+         * 当词库和负采样规模相当，甚至更大时，该问题会凸显，当负采样规模远大于词库规模时，该问题可以得到控制，即增大了采样密度，放大了词的分辨率
+         *
+         * 若要严格均匀采样，该行代码应该改为是：if (a / (double) table_size < d1) table[a] = i;  即保证采样点落在该词内才将其采样（边缘上为下一个词）
+         */
+        table[a] = i;
         if (a / (double) table_size > d1) {                                                        // 采样点落在下一个（或之后）词上，移到到下一个词
             i++;
             d1 += pow(vocab[i].cn, power) / train_words_pow;                                       // 累加词的线段比例
@@ -256,14 +256,14 @@ int AddWordToVocab(char *word) {
         vocab_max_size += 1000;
         vocab = (struct vocab_word *) realloc(vocab, vocab_max_size * sizeof(struct vocab_word));
     }
-	
-	/**
-	 * 这三行代码是对该词建立hash映射，哈希冲突时线性探测继续顺序往下查找空白位置
-	 */
+    
+    /**
+     * 这三行代码是对该词建立hash映射，哈希冲突时线性探测继续顺序往下查找空白位置
+     */
     hash = GetWordHash(word);
     while (vocab_hash[hash] != -1) hash = (hash + 1) % vocab_hash_size;
     vocab_hash[hash] = vocab_size - 1;
-	
+    
     return vocab_size - 1;                                                                         // 返回添加的词在词库中的存储位置，即最后一个
 }
 
@@ -301,17 +301,17 @@ void SortVocab() {
             free(vocab[a].word);                                                                   // 释放该词的存储空间
         } else {                                                                                   // 重新计算hash映射
             // Hash will be re-computed, as after the sorting it is not actual
-			/**
-	         * 这三行代码是重建词的hash映射，哈希冲突时线性探测继续顺序往下查找空白位置
-	         */
+            /**
+             * 这三行代码是重建词的hash映射，哈希冲突时线性探测继续顺序往下查找空白位置
+             */
             hash = GetWordHash(vocab[a].word);
             while (vocab_hash[hash] != -1) hash = (hash + 1) % vocab_hash_size;
             vocab_hash[hash] = a;
             
-			train_words += vocab[a].cn;                                                            // 词频累加
+            train_words += vocab[a].cn;                                                            // 词频累加
         }
     }
-	
+    
     vocab = (struct vocab_word *) realloc(vocab, (vocab_size + 1) * sizeof(struct vocab_word));    // 删除低频词后，重新分配vocab的内存大小，以释放一些不必要的存储空间，原词库中vocab_size + 1后的低频词全部被删除
 
     // Allocate memory for the binary tree construction
@@ -374,7 +374,7 @@ void ReduceVocab() {
  * 遍历词库中的每个词，从parent_node数组中可以一路找到根节点，这个路径的逆序就是词的哈夫曼路径，而这个路径上的每个节点的编码（除根节点）就构成了该词的哈夫曼编码
  */
 void CreateBinaryTree() {
-	
+    
     /**
      * min1i                     最小权重节点的位置
      * min2i                     次小权重节点的位置
@@ -392,7 +392,7 @@ void CreateBinaryTree() {
     pos1 = vocab_size - 1;                                                                         // 设置pos1为左侧（叶子节点）权重最小的位置，从右向左移动，初始值为最后一个词的下标，即vocab_size - 1
     pos2 = vocab_size;                                                                             // 设置pos2为右侧（非叶子节点）权重最小的位置，从左向右移动，初始时没有非叶子节点，初值为vocab_size
     // Following algorithm constructs the Huffman tree by adding one node at a time
-	for (a = 0; a < vocab_size - 1; a++) {                                                         // 在哈夫曼树中，有vocab_size - 1个非叶子节点，因此要循环vocab_size - 1次，每一次循环会合并两个最小的权重，构建一个非叶子节点
+    for (a = 0; a < vocab_size - 1; a++) {                                                         // 在哈夫曼树中，有vocab_size - 1个非叶子节点，因此要循环vocab_size - 1次，每一次循环会合并两个最小的权重，构建一个非叶子节点
         // First, find two smallest nodes 'min1, min2'
         /**
          * 第一个if查找最小的权重位置
@@ -449,15 +449,15 @@ void CreateBinaryTree() {
         vocab[a].point[0] = vocab_size - 2;                                                        // 根节点位置，point[0]即是根节点位置（vocab_size * 2 - 2 - vocab_size），路径的长度比编码的长度大1，因此这里在point数组里记录了根节点
         for (b = 0; b < i; b++) {                                                                  // 逆序处理
             vocab[a].code[i - b - 1] = code[b];                                                    // 编码逆序，没有根节点，所以i - b减去1
-			
-			/**
-			 * 路径逆序，point的长度比code长1，即根节点，point数组“最后”一个值是负的，point路径是为了定位节点位置，叶子节点即是词本身，不用定位，所以训练时这个负数是用不到的
-			 * 
-			 * 在count数组中，非叶子节点的下标范围为[vocab_size, vocab_size * 2 - 2]
-			 * 但在词向量训练时，非叶子节点词向量是存储在syn1数组中的，虽然syn1数组的大小为vocab_size * layer1_size，但可以理解成vocab_size个向量，即大小为vocab_size
-			 * 所以这里做了一个映射，把count数组非叶子节点的范围[vocab_size, vocab_size * 2 - 2]顺序映射到syn1数组的向量范围的[0, vocab_size - 2]
-			 * 所以这里用point[b]减去了vocab_size，包括上面根节点的位置也是减去了vocab_size
-			 */
+            
+            /**
+             * 路径逆序，point的长度比code长1，即根节点，point数组“最后”一个值是负的，point路径是为了定位节点位置，叶子节点即是词本身，不用定位，所以训练时这个负数是用不到的
+             * 
+             * 在count数组中，非叶子节点的下标范围为[vocab_size, vocab_size * 2 - 2]
+             * 但在词向量训练时，非叶子节点词向量是存储在syn1数组中的，虽然syn1数组的大小为vocab_size * layer1_size，但可以理解成vocab_size个向量，即大小为vocab_size
+             * 所以这里做了一个映射，把count数组非叶子节点的范围[vocab_size, vocab_size * 2 - 2]顺序映射到syn1数组的向量范围的[0, vocab_size - 2]
+             * 所以这里用point[b]减去了vocab_size，包括上面根节点的位置也是减去了vocab_size
+             */
             vocab[a].point[i - b] = point[b] - vocab_size;
         }
     }
@@ -496,14 +496,14 @@ void LearnVocabFromTrainFile() {
             a = AddWordToVocab(word);
             vocab[a].cn = 1;
         } else vocab[i].cn++;                                                                      // 词已经在词库中，词频加1
-		
-		/**
-		 * 每添加一个词，判断一次词库大小，若大于填充因子上限，删除一次低频词
-		 * 
-		 * 注意，这里有一个问题，在删除低频词时，语料文件可能是未处理完的，只是读取了一部分词
-		 * 所以词库当前状态下的词频信息是局部的，不是训练文件全局的
-		 * 这时删除低频词时，是把局部的低频词删除，但局部低频词未必是全局低频词，例如，一个词在训练文件的前一部分少量出现，但在后面部分，大量出现
-		 */
+        
+        /**
+         * 每添加一个词，判断一次词库大小，若大于填充因子上限，删除一次低频词
+         * 
+         * 注意，这里有一个问题，在删除低频词时，语料文件可能是未处理完的，只是读取了一部分词
+         * 所以词库当前状态下的词频信息是局部的，不是训练文件全局的
+         * 这时删除低频词时，是把局部的低频词删除，但局部低频词未必是全局低频词，例如，一个词在训练文件的前一部分少量出现，但在后面部分，大量出现
+         */
         if (vocab_size > vocab_hash_size * 0.7) ReduceVocab();
     }
     SortVocab();                                                                                   // 读完语料文件后，对词库进行一次按词频排序，并删除低频词
@@ -576,7 +576,7 @@ void ReadVocab() {
 void InitNet() {
     long long a, b;
     unsigned long long next_random = 1;
-	
+    
     /**
      * vocab_size个词，每个词的向量维度为layer1_size
      */
@@ -590,7 +590,7 @@ void InitNet() {
      * hierarchical softmax
      */
     if (hs) {
-		
+        
         /**
          * vocab_size个词，每个词的向量维度为layer1_size
          */
@@ -599,7 +599,7 @@ void InitNet() {
             printf("Memory allocation failed\n");
             exit(1);
         }
-		
+        
         /**
          * 零初始化
          */
@@ -607,12 +607,12 @@ void InitNet() {
             for (b = 0; b < layer1_size; b++)
                 syn1[a * layer1_size + b] = 0;
     }
-	
+    
     /**
      * negative sampling
      */
     if (negative > 0) {
-		
+        
         /**
          * vocab_size个词，每个词的向量维度为layer1_size
          */
@@ -621,7 +621,7 @@ void InitNet() {
             printf("Memory allocation failed\n");
             exit(1);
         }
-		
+        
         /**
          * 零初始化
          */
@@ -629,7 +629,7 @@ void InitNet() {
             for (b = 0; b < layer1_size; b++)
                 syn1neg[a * layer1_size + b] = 0;
     }
-	
+    
     /**
      * 每个词向量每个维度用[-0.5/layer1_size, 0.5/layer1_size]范围的数初始化
      */
@@ -641,7 +641,7 @@ void InitNet() {
 
     /**
      * 创建哈夫曼树
-	 * 当只使用negative sampling训练词向量时，构建哈夫曼树多余了
+     * 当只使用negative sampling训练词向量时，构建哈夫曼树多余了
      */
     CreateBinaryTree();
 }
@@ -695,18 +695,18 @@ void *TrainModelThread(void *id) {
     FILE *fi = fopen(train_file, "rb");                                                            // 打开训练文件
     fseek(fi, file_size / (long long) num_threads * (long long) id, SEEK_SET);                     // 设置当前线程开始训练的初始位置
     
-	/**
-	 * 当选择CBOW模型时，用上下文的词来预测当前词，再反向修正上下文的词的词向量
-	 * 当选择Skip-gram模型时，用当前词来预测上下文的词，再反向修正当前词的词向量
-	 *
-	 * 每次读取一个句子（句子过长时截断），按句子为单位进行训练
-	 * 对分配给当前线程的全部句子迭代训练iter次
-	 */
-	while (1) {
-		
-		/**
-		 * 每训练10000个词，衰减一次学习率
-		 */
+    /**
+     * 当选择CBOW模型时，用上下文的词来预测当前词，再反向修正上下文的词的词向量
+     * 当选择Skip-gram模型时，用当前词来预测上下文的词，再反向修正当前词的词向量
+     *
+     * 每次读取一个句子（句子过长时截断），按句子为单位进行训练
+     * 对分配给当前线程的全部句子迭代训练iter次
+     */
+    while (1) {
+        
+        /**
+         * 每训练10000个词，衰减一次学习率
+         */
         if (word_count - last_word_count > 10000) {
             word_count_actual += word_count - last_word_count;                                     // word_count_actual词频累加，全部线程都累加
             last_word_count = word_count;                                                          // 记录当前训练的词频总数
@@ -717,17 +717,17 @@ void *TrainModelThread(void *id) {
                        word_count_actual / ((real) (now - start + 1) / (real) CLOCKS_PER_SEC * 1000));
                 fflush(stdout);
             }
-			
-			/**
-			 * 按训练进度衰减学习率，当衰减到一度程度后不再衰减
-			 */
+            
+            /**
+             * 按训练进度衰减学习率，当衰减到一度程度后不再衰减
+             */
             alpha = starting_alpha * (1 - word_count_actual / (real) (iter * train_words + 1));
             if (alpha < starting_alpha * 0.0001) alpha = starting_alpha * 0.0001;
         }
-		
-		/**
-		 * 当前句子训练完成，读取下一个句子（每一次训练迭代开始，sentence_length也是为0）
-		 */
+        
+        /**
+         * 当前句子训练完成，读取下一个句子（每一次训练迭代开始，sentence_length也是为0）
+         */
         if (sentence_length == 0) {
             while (1) {                                                                            // 读取句子，直到遇到文件尾、换行符或被截断
                 word = ReadWordIndex(fi, &eof);                                                    // 读取一个词，返回词在词库中的索引
@@ -737,9 +737,9 @@ void *TrainModelThread(void *id) {
                 if (word == 0) break;                                                              // 遇到换行符</s>，词库中第一个词是</s>，即word == 0
                 
                 // The subsampling randomly discards frequent words while keeping the ranking same
-				/**
-				 * 进行亚采样时，以一定概率过滤调频词
-				 */
+                /**
+                 * 进行亚采样时，以一定概率过滤调频词
+                 */
                 if (sample > 0) {
                     real ran = (sqrt(vocab[word].cn / (sample * train_words)) + 1) * (sample * train_words) / vocab[word].cn;
                     next_random = next_random * (unsigned long long) 25214903917 + 11;
@@ -751,11 +751,11 @@ void *TrainModelThread(void *id) {
             }
             sentence_position = 0;                                                                 // 句子读取完成，设置句子的初始训练下标为0
         }
-		
-		/**
-		 * 当前线程遇到文件尾，或者分配给该线程的全部词已完成了一次训练
-		 * 设置一些初始值后进行下一次训练
-		 */
+        
+        /**
+         * 当前线程遇到文件尾，或者分配给该线程的全部词已完成了一次训练
+         * 设置一些初始值后进行下一次训练
+         */
         if (eof || (word_count > train_words / num_threads)) {
             word_count_actual += word_count - last_word_count;                                     // word_count_actual词频累加
             local_iter--;                                                                          // 剩余训练次数减1
@@ -766,7 +766,7 @@ void *TrainModelThread(void *id) {
             fseek(fi, file_size / (long long) num_threads * (long long) id, SEEK_SET);             // 每次迭代开始，重置训练文件的开始位置
             continue;
         }
-		
+        
         word = sen[sentence_position];                                                             // word为当前词在词库的索引
         if (word == -1) continue;
         for (c = 0; c < layer1_size; c++) neu1[c] = 0;                                             // CBOW模型中，上下文词向量加和置0
@@ -774,10 +774,10 @@ void *TrainModelThread(void *id) {
         next_random = next_random * (unsigned long long) 25214903917 + 11;
         b = next_random % window;                                                                  // 生成动态上下文窗口，范围是sen[sentence_position - window + b, sentence_position + window - b]
         
-		/**
-		 * CBOW模型，用上下文的词来预测当前词，再反向修正上下文的词的词向量
-		 */
-		if (cbow) {  //train the cbow architecture
+        /**
+         * CBOW模型，用上下文的词来预测当前词，再反向修正上下文的词的词向量
+         */
+        if (cbow) {  //train the cbow architecture
             // in -> hidden
             cw = 0;                                                                                //  上下文窗口内的词数，去除当前词
             for (a = b; a < window * 2 + 1 - b; a++)
@@ -793,24 +793,24 @@ void *TrainModelThread(void *id) {
             if (cw) {                                                                              // 当前词有上下文，有上下文时才进行训练
                 for (c = 0; c < layer1_size; c++) neu1[c] /= cw;                                   // 上下文各词词向量加和平均化
                 
-				/**
-				 * hierarchical softmax，用哈夫曼树进行训练
-				 * 遍历从根节点到当前词的叶子节点的路径，每个非叶子节点进行一次训练，可以理解成在已知父节点时，对子节点做一次二分类
-				 */
-				if (hs)
+                /**
+                 * hierarchical softmax，用哈夫曼树进行训练
+                 * 遍历从根节点到当前词的叶子节点的路径，每个非叶子节点进行一次训练，可以理解成在已知父节点时，对子节点做一次二分类
+                 */
+                if (hs)
                     for (d = 0; d < vocab[word].codelen; d++) {                                    // 从根节点开始，遍历路径上的每一个非叶子节点，注意是非叶子节点，其实是在根据父节点对子节点进行分类，预测子节点
                         f = 0;
                         l2 = vocab[word].point[d] * layer1_size;                                   // 计算当前非叶子节点词向量在syn1的开始位置
                         // Propagate hidden -> output
                         for (c = 0; c < layer1_size; c++) f += neu1[c] * syn1[c + l2];             // 上下文词向量加和向量（已被平均） 与 当前非叶子节点词向量 做内积
                         
-						/**
-						 * 从缓存中读取sigmod值，可以理解成在当前非叶子节点上进行的一次分类，word2vec中0表示正类，1表示负类
-						 */
-						if (f <= -MAX_EXP) continue;
+                        /**
+                         * 从缓存中读取sigmod值，可以理解成在当前非叶子节点上进行的一次分类，word2vec中0表示正类，1表示负类
+                         */
+                        if (f <= -MAX_EXP) continue;
                         else if (f >= MAX_EXP) continue;
                         else f = expTable[(int) ((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))];
-						
+                        
                         // 'g' is the gradient multiplied by the learning rate
                         /**
                          * f：                               表示根据当前非叶子节点（词）对其子节点（词）进行分类时得到的子节点的分类标签
@@ -826,12 +826,12 @@ void *TrainModelThread(void *id) {
                         // Learn weights hidden -> output
                         for (c = 0; c < layer1_size; c++) syn1[c + l2] += g * neu1[c];             // 更新当前非叶子节点的词向量
                     }
-					
+                    
                 // NEGATIVE SAMPLING
-				/**
-				 * negative sampling，用负采样进行训练
-				 * negative也表示也采样次数，即采样negative个负样本，这样就收集了一个正样本和negative个负样本，在每个样本上进行一次训练
-				 */
+                /**
+                 * negative sampling，用负采样进行训练
+                 * negative也表示也采样次数，即采样negative个负样本，这样就收集了一个正样本和negative个负样本，在每个样本上进行一次训练
+                 */
                 if (negative > 0)
                     for (d = 0; d < negative + 1; d++) {
                         if (d == 0) {
@@ -847,22 +847,22 @@ void *TrainModelThread(void *id) {
                         l2 = target * layer1_size;                                                 // 计算样本词向量在syn1neg的开始位置
                         f = 0;
                         for (c = 0; c < layer1_size; c++) f += neu1[c] * syn1neg[c + l2];          // 上下文词向量加和向量（已被平均） 与 负样本词向量 做内积
-						
-						/**
-						 * 从缓存中读取sigmod值，并计算梯度与学习率的乘积
-						 */
+                        
+                        /**
+                         * 从缓存中读取sigmod值，并计算梯度与学习率的乘积
+                         */
                         if (f > MAX_EXP) g = (label - 1) * alpha;
                         else if (f < -MAX_EXP) g = (label - 0) * alpha;
                         else g = (label - expTable[(int) ((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))]) * alpha;
-						
+                        
                         for (c = 0; c < layer1_size; c++) neu1e[c] += g * syn1neg[c + l2];         // 累加词向量的修正量，这里遍历了每个样本点（包括正负样本），先对修正值进行累加，下面会更新到上下文词的词向量中
                         for (c = 0; c < layer1_size; c++) syn1neg[c + l2] += g * neu1[c];          // 更新负样本的词向量
                     }
-					
+                    
                 // hidden -> in
-				/**
-				 * 将词向量的修正量更新到上下文中的每个词的词向量中
-				 */
+                /**
+                 * 将词向量的修正量更新到上下文中的每个词的词向量中
+                 */
                 for (a = b; a < window * 2 + 1 - b; a++)
                     if (a != window) {
                         c = sentence_position - window + a;
@@ -874,11 +874,11 @@ void *TrainModelThread(void *id) {
                     }
             }
         }
-		
-		/**
-		 * Skip-gram模型，用当前词来预测上下文的词，再反向修正当前词的词向量
-		 */
-		else {  //train skip-gram
+        
+        /**
+         * Skip-gram模型，用当前词来预测上下文的词，再反向修正当前词的词向量
+         */
+        else {  //train skip-gram
             for (a = b; a < window * 2 + 1 - b; a++)                                               // 遍历上下文中的每个词，做一次训练（当前词不用做训练）
                 if (a != window) {                                                                 // 跳过当前词
                     c = sentence_position - window + a;                                            // 计算上下文词在句子中的位置
@@ -1000,7 +1000,7 @@ void TrainModel() {
 
     /**
      * 全部线程训练完成后，将训练好的词向量输出到output_file文件
-	 * 输出由classes和binary两个参数共同控制，classes表示是否进行聚类输出，binary表示在不聚类输出时，以二进制输出还是文本输出
+     * 输出由classes和binary两个参数共同控制，classes表示是否进行聚类输出，binary表示在不聚类输出时，以二进制输出还是文本输出
      */
     fo = fopen(output_file, "wb");                                                                 // 打开词向量输出文件
     if (classes == 0) {                                                                            // 不聚类输出

@@ -34,15 +34,28 @@ struct vocab_word {                                                             
     char *word, *code, codelen;                                                                    // 分别是：词，哈夫曼编码，编码长度
 };
 
-char train_file[MAX_STRING], output_file[MAX_STRING];                                              // train_file：要训练的语料文件，按句子组织；output_file：训练后词向量的输出文件
-char save_vocab_file[MAX_STRING], read_vocab_file[MAX_STRING];                                     // save_vocab_file：词库输出文件；read_vocab_file：词库读入文件。这两个文件是词库的输入和输出，而上面两个文件是语料读入文件和词向量保存文件
-struct vocab_word *vocab;                                                                          // 词库数组，一维数组
+/**
+ * train_file                   要训练的语料文件，以句子为单位进行训练，会从该文件读取词以建立词库，训练时从该文件读入句子
+ * output_file                  训练后词向量的输出文件，由binary和classes共同控制输出结果
+ */
+char train_file[MAX_STRING], output_file[MAX_STRING];
 
 /**
- * binary                       训练好的词向量以什么格式输出到文件，1：二进制输出；0：文本形式输出。下面还有一个classes变量，输出结果classes和binary共同控制，若classes = 0，由binary控制；若classes > 0，聚类输出（这时只输出词和聚类类别，不输出词向量）
+ * save_vocab_file              当提供该参数时，建立词库后，会把词库保存到该文件
+ * read_vocab_file              当提供该参数时，从该文件读入词库词库；若不提供该参数时，从训练语料文件（train_file）读入并建立词库
+ */
+char save_vocab_file[MAX_STRING], read_vocab_file[MAX_STRING];
+
+/**
+ * 词库数组，一维数组，每一个对象都是vocab_word类型
+ */
+struct vocab_word *vocab;
+
+/**
+ * binary                       词向量输出控制，classes和binary共同控制。若classes = 0，由binary控制，binary = 1时二进制输出，binary = 0时文本格式输出；若classes > 0，聚类输出（只输出词和聚类类别，不输出词向量）
  * cbow                         1：使用CBOW模型，0：使用Skip-gram模型
  * debug_mode                   用于输出一些进度信息
- * window                       上下文窗口大小，实际使用的是动态窗口，大小为[0, window]
+ * window                       上下文窗口大小，实际使用的是动态窗口，动态大小为[0, window]
  * min_count                    最小词频
  * num_threads                  训练线程数，多线程训练
  * min_reduce                   最小词频
@@ -50,7 +63,7 @@ struct vocab_word *vocab;                                                       
 int binary = 0, cbow = 1, debug_mode = 2, window = 5, min_count = 5, num_threads = 12, min_reduce = 1;
 
 /**
- * vocab_hash                   词库的hash表，将词按hash映射到词库，vocab_hash[word_hash] = 词在词库的位置，在建立词库时用，目的是，训练时不会用到
+ * vocab_hash                   词库的hash表，将词按hash映射到词库，vocab_hash[word_hash] = 词在词库的位置，在建立词库时用，训练时不会用到
  */
 int *vocab_hash;
 
@@ -63,57 +76,76 @@ long long vocab_max_size = 1000, vocab_size = 0, layer1_size = 100;
 
 /**
  * train_words                  要训练的词总数（词频累加，但不包含低频词），在多线程训练时，每个线程要训练的词数是train_words / num_threads
- * word_count_actual            已经训练完的词频总数，因为训练迭代次数为iter次，所以最终word_count_actual = iter * train_words（因为训练时要分割训练文件，词可能被分割，因此可能会不相等，但删除低频词后，一般还是会相等）
- * iter                         每个训练线程训练迭代的次数，即每个线程对各自分配到的语料迭代训练iter次
+ * word_count_actual            已经训练完的词频总数，因为训练迭代次数为iter次，所以最终word_count_actual = iter * train_words
+ * iter                         每个训练线程训练迭代的次数，即每个线程对各自分配到的语料上迭代训练iter次
  * file_size                    训练文件大小，ftell得到，多线程训练时会对文件进行分隔，用于定位每个训练线程开始训练的文件位置
- * classes                      表示训练好的词向量是否聚类输出，0：不聚类，直接输出；大于0：聚类输出，classes也是聚类个数，与binary共同控制词向量结果输出
+ * classes                      词向量输出控制，classes和binary共同控制。若classes = 0，由binary控制，binary = 1时二进制输出，binary = 0时文本格式输出；若classes > 0，聚类输出（只输出词和聚类类别，不输出词向量）
  */
 long long train_words = 0, word_count_actual = 0, iter = 5, file_size = 0, classes = 0;
 
 /**
- * alpha                        学习速率，过程中自动调整
+ * alpha                        学习速率，会根据训练进度衰减
  * starting_alpha               初始alpha值
- * sample                       亚采样概率的参数，亚采样的目的是以一定概率拒绝高频词，使得低频词有更多出镜率，默认为0，即不进行亚采样（采样的阈值，如果一个词语在训练样本中出现的频率越大,那么就越会被采样）
+ * sample                       亚采样概率，会以一定的概率过滤高于这个值的高频词，加速训练，也提高相对低频词的精度
  */
 real alpha = 0.025, starting_alpha, sample = 1e-3;
 
 /**
- * syn0                         存储词典中每个词的词向量，哈夫曼树中叶子节点的词向量，一维数组，第i个词的词向量为syn0[i * layer1_size, (i + 1) * layer1_size - 1]
- * syn1                         哈夫曼树中非叶子节点的词向量，一维数组，第i个词的词向量为syn1[i * layer1_size, (i + 1) * layer1_size - 1]
- * syn1neg                      负采样时，存储每个词对应的辅助向量，一维数组，第i个词的词向量为syn1neg[i * layer1_size, (i + 1) * layer1_size - 1]
- * expTable                     预先存储sigmod函数结果，算法执行中查表，提前计算好，提高效率
+ * syn0                         存储词库中每个词的词向量（哈夫曼树中叶子节点的词向量），一维数组，第i个词的词向量为syn0[i * layer1_size, (i + 1) * layer1_size - 1]
+ * syn1                         哈夫曼树中非叶子节点的辅助向量，一维数组，第i个辅助向量为syn1[i * layer1_size, (i + 1) * layer1_size - 1]
+ * syn1neg                      负采样时，存储每个样本对应的词向量，一维数组，第i个词的词向量为syn1neg[i * layer1_size, (i + 1) * layer1_size - 1]
+ * expTable                     预先存储sigmod函数结果，训练中直接查表
  */
 real *syn0, *syn1, *syn1neg, *expTable;
 
 /**
- * start                        算法运行的起始时间，会用于计算平均每秒钟处理多少词
+ * start                        训练开始时间，用于输出训练进度
  */
 clock_t start;
 
-int hs = 0, negative = 5;                                                                          // hs：层次归一化标志，negative：负采样标志，两个算法是混合使用的
-const int table_size = 1e8;                                                                        // 静态采样表的规模，即采样点个数
-int *table;                                                                                        // 采样表
+/**
+ * hs                           hierarchical softmax标志
+ * negative                     negative sampling标志，也是负采样数，当negative和hs同时大于0时，这两个方法是混合使用的
+ */
+int hs = 0, negative = 5;
+
+/**
+ * table_size                   负采样表的大小
+ */
+const int table_size = 1e8;
+
+/**
+ * table                        负采样表，大小为table_size，每一个采样点对应的是词在词库的位置
+ */
+int *table;
 
 
 /**
- * 根据词频生成采样表，也就是每个单词的能量分布表，table在负采样中用到
+ * 根据词频生成负采样表
+ *
+ * 可以这么理解：将词频视为一段线段，长度为词频大小，依次首尾相连后可以形成一段长度为1的线段，在这个线段内均匀采点table_size次，则采集到的点对应的词即组成负样本集
  */
 void InitUnigramTable() {
     int a, i;
-    double train_words_pow = 0;                                                                    // 词汇表的能量总值
-    double d1, power = 0.75;                                                                       // 概率与词频的power次方成正比
+    double train_words_pow = 0;                                                                    // 线段总长
+    double d1, power = 0.75;                                                                       // d1用于迭代累加每个词线段的长度（其实是比例），power用于计算每个词的线段长度（词频的0.75次方）
     table = (int *) malloc(table_size * sizeof(int));
-    for (a = 0; a < vocab_size; a++) train_words_pow += pow(vocab[a].cn, power);                   // 遍历词汇表，统计词的能量总值
+    for (a = 0; a < vocab_size; a++) train_words_pow += pow(vocab[a].cn, power);                   // 累加每个词线段的长度
 
-    i = 0;
-    d1 = pow(vocab[i].cn, power) / train_words_pow;                                                // 表示已遍历词的能量值占总能量的比，可以理解成非等距能量值
-    for (a = 0; a < table_size; a++) {                                                             // a：table表的索引，可以理解成等距采样点
-        table[a] = i;                                                                              // i：词汇表的索引，将待距采样点映射到非等距能量值，并将该能量值对应的词记录到采样表中
-        if (a / (double) table_size > d1) {                                                        // 采样范围超出能量范围时，跳到下一个能量值（即i++）
-            i++;                                                                                   // 跳到下一个能量值
-            d1 += pow(vocab[i].cn, power) / train_words_pow;                                       // 累加下一个词的能量值
+    /**
+     * 从词库的第一个词开始，向右遍历每个词；同时也从第一个采样点开始，向右遍历每一个采样点
+     * 通过比例计算，判断当前采样点是否落在当前词，是：采集当前词到采样表，同时采样点向右移动；否：当前采样点落在下一个（或之后）词上，移动到下一次词。
+     * 直到遍历完词库和采样点，即可完成负样本采集
+     */
+    i = 0;                                                                                         // i用于遍历词库，用于指示当前词位置
+    d1 = pow(vocab[i].cn, power) / train_words_pow;                                                // 第一个词的线段比例
+    for (a = 0; a < table_size; a++) {                                                             // 遍历采样点
+        table[a] = i;                                                                              // 收集当前词到负样本集（注意：在数学上，这里逻辑不严谨，逻辑上并没有做到均匀采点，但可以采集到词库第i位前的全部词，包括低频词，但在大规模词库上，这个影响非常小）
+        if (a / (double) table_size > d1) {                                                        // 采样点落在下一个（或之后）词上，移到到下一个词
+            i++;
+            d1 += pow(vocab[i].cn, power) / train_words_pow;                                       // 累加词的线段比例
         }
-        if (i >= vocab_size) i = vocab_size - 1;                                                   // 处理最后一段能量值，所有落在最后一个能量值后的，都选中最后一个词
+        if (i >= vocab_size) i = vocab_size - 1;                                                   // 采样点落在词库外，这时采集最后一个词，词频计算时可能精度丢失，导致词频总和不严格等于1
     }
 }
 

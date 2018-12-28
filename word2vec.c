@@ -503,6 +503,7 @@ void LearnVocabFromTrainFile() {
          * 注意，这里有一个问题，在删除低频词时，语料文件可能是未处理完的，只是读取了一部分词
          * 所以词库当前状态下的词频信息是局部的，不是训练文件全局的
          * 这时删除低频词时，是把局部的低频词删除，但局部低频词未必是全局低频词，例如，一个词在训练文件的前一部分少量出现，但在后面部分，大量出现
+         * 不过考虑到词库规模（千万级），这个问题也不太可能出现
          */
         if (vocab_size > vocab_hash_size * 0.7) ReduceVocab();
     }
@@ -647,30 +648,38 @@ void InitNet() {
 }
 
 /**
- * 训练网络
- * @param id 线程编号[0, num_threads - 1]，不是线程号，表示num_threads个线程中的第几个线程，用于分割语料文件
+ * 训练词向量
+ * @param id 线程编号[0, num_threads - 1]，不是线程号，表示num_threads个线程中的第几个线程，用于分割语料文件，确定本线程从语料文件读取句子的开始位置
  * @return
  *
- * 多线程训练，将训练文本分成线程个数相等的份数，每个线程训练其中一份，每个线程对分配到的句子迭代训练iter次
- * 训练按句子进行，每次从训练文件中读取一个句子，如果句子超长（超过MAX_SENTENCE_LENGTH个词），则截断
+ * 多线程训练，将训练语料分成与线程个数相等的份数，每个线程训练其中一份，每个线程对其分配到的语料子集迭代训练iter次
+ * 训练按句子进行，每次从语料文件中读取一个句子，如果句子超长（超过MAX_SENTENCE_LENGTH个词），则截断，剩余的被当作下一个句子
  *
  * 根据cbow参数决定选择CBOW模型还是Skip-gram模型，cbow=1：使用CBOW模型；cbow=0：使用Skip-gram模型。但是要注意的是不管选择哪个模型都可以混合使用hierarchical softmax和negative sampling
  *
+ * CBOW模型的训练思想是根据上下文预测当前词，得到一个预测误差，将该误差反向更新到每一个上下文词上，让这些上下文词向更正确的预测当前词的方向更新
+ * Skip-gram模型的训练思想与CBOW模型相反，是根据当前词预测上下文，得到一个预测误差，将该误差反向更新到当前词上，让当前词向更正确的预测上下文的方向更新
+ *
+ * 但是在word2vec中，Skip-gram模型的并没有按上面的思想进行训练，而是借鉴了CBOW的思想，其思路是用上下文中的每一个词来预测当前词，得到一个预测误差，再将该误差反向更新到该上下文词上
+ *
+ * 注意，word2vec是多线程训练，全局训练参数是共享的，这一点要特别注意，下面的注释中没有刻意说明这一点
+ *
+ * word2vec训练的数学推导可以参照CSDN博文：https://blog.csdn.net/sealir/article/details/85269567
  */
 void *TrainModelThread(void *id) {
     /**
      * a：                       用于遍历对象
-     * b：                       动态上下文窗口大小
+     * b：                       动态上下文窗口大小，动态大小为[0, window]
      * d：                       用于遍历对象
-     * word：                    当前词在词库中的索引
-     * last_word：               上下文词在词库中的索引
-     * sentence_length：         当前训练句子的词个数
-     * sentence_position：       当前词在句子中的位置，用于迭代句子中的词
+     * word：                    当前词，注意：word的值其实是词在词库中的位置，为了注释方便，以下注释中提到词时都是指词在词库中的位置，辅助向量也是一样
+     * last_word：               用于遍历上下文
+     * sentence_length：         当前训练句子的长度（词数）
+     * sentence_position：       当前词在句子中的位置
      */
     long long a, b, d, cw, word, last_word, sentence_length = 0, sentence_position = 0;
 
     /**
-     * word_count：              当前线程已经训练的词总数（词频累加）
+     * word_count：              已经训练的词总数（词频累加）
      * last_word_count：         上一次记录的已经训练的词频总数，用于衰减学习率，每训练10000个词衰减一次
      * sen：                     当前待训练的句子，存储每个词在词库中的索引
      */
@@ -979,7 +988,7 @@ void *TrainModelThread(void *id) {
  * 1、从词库文件或语料文件中构建词库，并根据参数是否保存词库
  * 2、调用初始化函数初始化训练参数
  * 3、若使用negative sampling，初始化负采样表
- * 4、创建num_threads个训练线程，启动并等待全部线程训练结束
+ * 4、创建num_threads个训练线程，启动并等待全部线程训练结束（注意：在多线程训练时，训练参数是线程共享的）
  * 5、输出词向量
  */
 void TrainModel() {
@@ -1019,27 +1028,27 @@ void TrainModel() {
         }
     } else {                                                                                       // 先按K均值聚类后，再输出词向量，classes：表示聚类个数，这时不输出词向量，而是输出聚类类别
         // Run K-means on the word vectors
-        int clcn = classes, iter = 10, closeid;                                                    // clcn：聚类个数，iter：迭代次数，closeid：表示某个词最近的类编号
-        int *centcn = (int *) malloc(classes * sizeof(int));                                       // 每个类的词汇个数，一维数组
-        int *cl = (int *) calloc(vocab_size, sizeof(int));                                         // 每个词对应的类编号，一维数组
-        real closev, x;                                                                            // x：词向量和类中心的内积，值越大说明距离越近；closev：最大的内积，即距离最近
-        real *cent = (real *) calloc(classes * layer1_size, sizeof(real));                         // 每个类的聚类中心，一维数组，第i个类的中心为cent[i * layer1_size, (i + 1) * layer1_size - 1]
-        for (a = 0; a < vocab_size; a++) cl[a] = a % clcn;                                         // 初始化每个词的类编号，即初始聚类
+        int clcn = classes, iter = 10, closeid;                                                    // clcn：聚类个数，iter：迭代次数，closeid：表示某个词最近的类别编号
+        int *centcn = (int *) malloc(classes * sizeof(int));                                       // 存储每个类别的词个数，一维数组，大小为classes
+        int *cl = (int *) calloc(vocab_size, sizeof(int));                                         // 每个词对应的类别编号，一维数组，大小为vocab_size
+        real closev, x;                                                                            // x：词向量和聚类中心的内积（余弦距离），值越大说明距离越近；closev：最大的内积，这时距离最近
+        real *cent = (real *) calloc(classes * layer1_size, sizeof(real));                         // 每个类别的聚类中心，一维数组，第i个类的中心为cent[i * layer1_size, (i + 1) * layer1_size - 1]
+        for (a = 0; a < vocab_size; a++) cl[a] = a % clcn;                                         // 初始化每个词的类编号，即初始聚类（这跟打牌时的发牌过程很相似哦）
         for (a = 0; a < iter; a++) {                                                               // 迭代iter次，每次迭代重新进行一次聚类，并计算新的聚类中心
             for (b = 0; b < clcn * layer1_size; b++) cent[b] = 0;                                  // 每次迭代开始，设置每个聚类中心为0
-            for (b = 0; b < clcn; b++) centcn[b] = 1;                                              // 每次迭代开始，设置每个类的词汇个数为1
+            for (b = 0; b < clcn; b++) centcn[b] = 1;                                              // 每次迭代开始，设置每个类别的词汇个数为1
 
             /**
-             * 重新计算每个类的聚类中心和词汇个数，这个“聚类中心”并不是真正的中心，这一阶段是累加“中心”的每个分量，后面会计算真正的中心，将“聚类中心”的每个分量除以类中词汇个数才是真正的中心
+             * 重新计算每个类别的聚类中心和词汇个数，这个“聚类中心”并不是真正的中心，这一阶段是累加“中心”的每个分量，将“聚类中心”的每个分量除以类别中词汇个数才是真正的中心
              */
             for (c = 0; c < vocab_size; c++) {
                 for (d = 0; d < layer1_size; d++) cent[layer1_size * cl[c] + d] += syn0[c * layer1_size + d];
-                centcn[cl[c]]++;                                                                   // 每个类的词汇累加
+                centcn[cl[c]]++;
             }
 
 
             /**
-             * 将上面累加的“聚类中心”除以各个类的词汇个数，得到真正的聚类中心，并将中心向量归一化
+             * 将上面累加的“聚类中心”除以各个类别的词汇个数，得到真正的聚类中心，并将中心向量归一化
              */
             for (b = 0; b < clcn; b++) {
                 closev = 0;
@@ -1048,11 +1057,11 @@ void TrainModel() {
                     closev += cent[layer1_size * b + c] * cent[layer1_size * b + c];               // 累加聚类中心每个分量的平方，用于计算聚类中心向量的长度
                 }
                 closev = sqrt(closev);                                                             // 计算计算聚类中心向量的长度
-                for (c = 0; c < layer1_size; c++) cent[layer1_size * b + c] /= closev;             // 聚类中心向量归一化，方便计算每个词向量到各个聚类中心的距离
+                for (c = 0; c < layer1_size; c++) cent[layer1_size * b + c] /= closev;             // 聚类中心向量归一化，方便计算余弦距离
             }
 
             /**
-             * 计算每个词向量到每个聚类中心的内积，内积最大表示该词向量到该聚类中心最近，因此更新该词向量的聚类类别
+             * 计算每个词向量到每个聚类中心的内积（余弦距离），内积最大表示该词向量到该聚类中心最近，因此更新该词向量的聚类类别
              */
             for (c = 0; c < vocab_size; c++) {
                 closev = -10;
@@ -1065,7 +1074,7 @@ void TrainModel() {
                         closeid = d;
                     }
                 }
-                cl[c] = closeid;                                                                   // 更新词向量的聚类类别
+                cl[c] = closeid;                                                                   // 重新计算词的最近聚类中心后， 更新词向量的聚类类别
             }
         }
         // Save the K-means classes

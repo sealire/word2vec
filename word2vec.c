@@ -680,18 +680,18 @@ void *TrainModelThread(void *id) {
 
     /**
      * word_count：              已经训练的词总数（词频累加）
-     * last_word_count：         上一次记录的已经训练的词频总数，用于衰减学习率，每训练10000个词衰减一次
-     * sen：                     当前待训练的句子，存储每个词在词库中的索引
+     * last_word_count：         上一次记录的已经训练的词频总数，与word_count一起用于衰减学习率，每训练10000个词衰减一次
+     * sen：                     当前待训练的句子，存储的是每个词在词库中的位置
      */
     long long word_count = 0, last_word_count = 0, sen[MAX_SENTENCE_LENGTH + 1];
 
 
     /**
-     * l1：                      在Skip-gram模型中，在syn0中定位上下文词词向量的起始位置
-     * l2：                      hierarchical softmax时为在syn0中定位非叶子节点词词向量的起始位置，negative sampling时为在syn1neg中定位采样点（包括正负样本）词词向量的起始位置
+     * l1：                      在Skip-gram模型中，用于定位上下文词的词向量在syn0中的起始位置
+     * l2：                      hierarchical softmax时，用于定位非叶子节点辅助向量在syn1中的起始位置；negative sampling时，用于定位采样点（包括正负样本）辅助向量在syn1neg中的起始位置
      * c：                       用于遍历对象
-     * target：                  negative sampling时表示采样点（包括正负样本）词在词库中的索引
-     * label：                   negative sampling时表示样本标签，1：正样本；0：负样本
+     * target：                  在negative sampling中，表示采样点（包括正负样本）词
+     * label：                   在negative sampling中，表示样本标签，1：正样本；0：负样本
      * local_iter：              训练剩余迭代次数，一共迭代iter次
      */
     long long l1, l2, c, target, label, local_iter = iter;
@@ -699,14 +699,14 @@ void *TrainModelThread(void *id) {
     char eof = 0;                                                                                  // 训练文件结束符标志
     real f, g;
     clock_t now;
-    real *neu1 = (real *) calloc(layer1_size, sizeof(real));                                       // 用于CBOW模型，表示上下文各词词向量的加和
-    real *neu1e = (real *) calloc(layer1_size, sizeof(real));                                      // 累加词向量的修正量，即词向量 += neu1e
+    real *neu1 = (real *) calloc(layer1_size, sizeof(real));                                       // 用于CBOW模型，表示上下文各词的词向量的加和
+    real *neu1e = (real *) calloc(layer1_size, sizeof(real));                                      // 累加词向量的修正量，用neu1e修正词向量，即词向量 += neu1e
     FILE *fi = fopen(train_file, "rb");                                                            // 打开训练文件
-    fseek(fi, file_size / (long long) num_threads * (long long) id, SEEK_SET);                     // 设置当前线程开始训练的初始位置
+    fseek(fi, file_size / (long long) num_threads * (long long) id, SEEK_SET);                     // 定位当前线程开始训练的文件位置
     
     /**
-     * 当选择CBOW模型时，用上下文的词来预测当前词，再反向修正上下文的词的词向量
-     * 当选择Skip-gram模型时，用当前词来预测上下文的词，再反向修正当前词的词向量
+     * 当选择CBOW模型时，用全体上下文词来预测当前词，再反向修正上下文的词的词向量
+     * 当选择Skip-gram模型时，用每一个上下文词来预测当前词，再反向修正该上下文词的词向量
      *
      * 每次读取一个句子（句子过长时截断），按句子为单位进行训练
      * 对分配给当前线程的全部句子迭代训练iter次
@@ -741,80 +741,79 @@ void *TrainModelThread(void *id) {
             while (1) {                                                                            // 读取句子，直到遇到文件尾、换行符或被截断
                 word = ReadWordIndex(fi, &eof);                                                    // 读取一个词，返回词在词库中的索引
                 if (eof) break;                                                                    // 遇到文件尾
-                if (word == -1) continue;                                                          // 词库中不存在的词跳过
+                if (word == -1) continue;                                                          // 词库中不存在的词，跳过
                 word_count++;                                                                      // 词频累加
-                if (word == 0) break;                                                              // 遇到换行符</s>，词库中第一个词是</s>，即word == 0
+                if (word == 0) break;                                                              // 遇到换行符'</s>'，词库中第一个词是'</s>'，即word = 0
                 
                 // The subsampling randomly discards frequent words while keeping the ranking same
                 /**
-                 * 进行亚采样时，以一定概率过滤调频词
+                 * 进行亚采样时，以一定概率过滤调频词，加速训练，也提高相对低频词的精度
                  */
                 if (sample > 0) {
                     real ran = (sqrt(vocab[word].cn / (sample * train_words)) + 1) * (sample * train_words) / vocab[word].cn;
                     next_random = next_random * (unsigned long long) 25214903917 + 11;
                     if (ran < (next_random & 0xFFFF) / (real) 65536) continue;
                 }
-                sen[sentence_length] = word;                                                       // 记录句子中的词在词库中的索引
+                sen[sentence_length] = word;                                                       // 将该词加入到句子中
                 sentence_length++;                                                                 // 句子长度加1
                 if (sentence_length >= MAX_SENTENCE_LENGTH) break;                                 // 截断超长句子，剩余的被视为下一个句子
             }
-            sentence_position = 0;                                                                 // 句子读取完成，设置句子的初始训练下标为0
+            sentence_position = 0;                                                                 // 句子读取完成，设置句子的初始训练位置为第一个词
         }
         
         /**
-         * 当前线程遇到文件尾，或者分配给该线程的全部词已完成了一次训练
-         * 设置一些初始值后进行下一次训练
+         * 当前线程遇到文件尾，或者分配给该线程的全部词已完成了一次训练，设置一些初始值后进行下一次迭代训练
          */
         if (eof || (word_count > train_words / num_threads)) {
             word_count_actual += word_count - last_word_count;                                     // word_count_actual词频累加
             local_iter--;                                                                          // 剩余训练次数减1
-            if (local_iter == 0) break;                                                            // 已经训练完成
+            if (local_iter == 0) break;                                                            // 没有训练次数了，已经训练完成
             word_count = 0;                                                                        // 每次迭代开始，当前线程训练的词频总数设置为0
             last_word_count = 0;                                                                   // 每次迭代开始，上一次记录的已经训练的词频总数设置为0
             sentence_length = 0;                                                                   // 每次迭代开始，句子长度设置为0
-            fseek(fi, file_size / (long long) num_threads * (long long) id, SEEK_SET);             // 每次迭代开始，重置训练文件的开始位置
+            fseek(fi, file_size / (long long) num_threads * (long long) id, SEEK_SET);             // 每次迭代开始，重新定位当前线程开始训练的文件位置
             continue;
         }
         
-        word = sen[sentence_position];                                                             // word为当前词在词库的索引
+        word = sen[sentence_position];                                                             // word为当前词
         if (word == -1) continue;
-        for (c = 0; c < layer1_size; c++) neu1[c] = 0;                                             // CBOW模型中，上下文词向量加和置0
-        for (c = 0; c < layer1_size; c++) neu1e[c] = 0;                                            // 词向量的修正量置0
+        for (c = 0; c < layer1_size; c++) neu1[c] = 0;                                             // CBOW模型中，重置上下文词向量加和向量为0
+        for (c = 0; c < layer1_size; c++) neu1e[c] = 0;                                            // 重置词向量的修正量为0
         next_random = next_random * (unsigned long long) 25214903917 + 11;
-        b = next_random % window;                                                                  // 生成动态上下文窗口，范围是sen[sentence_position - window + b, sentence_position + window - b]
+        b = next_random % window;                                                                  // 生成动态上下文窗口大小，动态窗口在句子中的范围是sen[sentence_position - window + b, sentence_position + window - b]，注意可能会超出句子范围
         
         /**
-         * CBOW模型，用上下文的词来预测当前词，再反向修正上下文的词的词向量
+         * CBOW模型，用全体上下文词来预测当前词，再反向修正上下文的词的词向量
          */
         if (cbow) {  //train the cbow architecture
             // in -> hidden
-            cw = 0;                                                                                //  上下文窗口内的词数，去除当前词
-            for (a = b; a < window * 2 + 1 - b; a++)
-                if (a != window) {                                                                 // 去除当前词
-                    c = sentence_position - window + a;                                            // 计算上下文词在句子中的位置
+            cw = 0;                                                                                // 上下文窗口内的词数，不计当前词
+            for (a = b; a < window * 2 + 1 - b; a++)                                               // 累加上下文词的词向量
+                if (a != window) {                                                                 // 不计当前词
+                    c = sentence_position - window + a;                                            // c用于定位上下文词在句子中的真实位置，sentence_position位置是当前词
                     if (c < 0) continue;                                                           // 上下文窗口超出句子范围
                     if (c >= sentence_length) continue;                                            // 上下文窗口超出句子范围
-                    last_word = sen[c];                                                            // last_word表示上下文词在词库中的索引
+                    last_word = sen[c];                                                            // last_word表示上下文词
                     if (last_word == -1) continue;
-                    for (c = 0; c < layer1_size; c++) neu1[c] += syn0[c + last_word * layer1_size];// 上下文各词词向量加和
+                    for (c = 0; c < layer1_size; c++) neu1[c] += syn0[c + last_word * layer1_size];// 上下文各词的词向量加和
                     cw++;                                                                          // 上下文窗口内的词数加1
                 }
             if (cw) {                                                                              // 当前词有上下文，有上下文时才进行训练
-                for (c = 0; c < layer1_size; c++) neu1[c] /= cw;                                   // 上下文各词词向量加和平均化
+                for (c = 0; c < layer1_size; c++) neu1[c] /= cw;                                   // 将上下文各词词向量加和的和向量平均化
                 
                 /**
                  * hierarchical softmax，用哈夫曼树进行训练
-                 * 遍历从根节点到当前词的叶子节点的路径，每个非叶子节点进行一次训练，可以理解成在已知父节点时，对子节点做一次二分类
+                 * 遍历当前词的哈夫曼路径，在每个非叶子节点进行一次训练，预测一次子节点，其实就是对子节点做一次二分类，累加每次预测的误差
                  */
                 if (hs)
-                    for (d = 0; d < vocab[word].codelen; d++) {                                    // 从根节点开始，遍历路径上的每一个非叶子节点，注意是非叶子节点，其实是在根据父节点对子节点进行分类，预测子节点
+                    for (d = 0; d < vocab[word].codelen; d++) {                                    // 从根节点开始，遍历路径上的每一个非叶子节点，注意是非叶子节点，根据父节点对子节点进行预测
                         f = 0;
-                        l2 = vocab[word].point[d] * layer1_size;                                   // 计算当前非叶子节点词向量在syn1的开始位置
+                        l2 = vocab[word].point[d] * layer1_size;                                   // l2用于定位当前节点的辅助向量在syn1的开始位置
                         // Propagate hidden -> output
-                        for (c = 0; c < layer1_size; c++) f += neu1[c] * syn1[c + l2];             // 上下文词向量加和向量（已被平均） 与 当前非叶子节点词向量 做内积
+                        for (c = 0; c < layer1_size; c++) f += neu1[c] * syn1[c + l2];             // 将上下文词的加和向量（已被平均） 与 当前节点的辅助向量 做内积
                         
                         /**
-                         * 从缓存中读取sigmod值，可以理解成在当前非叶子节点上进行的一次分类，word2vec中0表示正类，1表示负类
+                         * 从缓存中读sigmod值，可以理解成预测子节点的类别，word2vec中0表示正类，1表示负类，注意在以下代码中，当f值超出范围时，不对该节点进行预测，直接跳过该节点
                          */
                         if (f <= -MAX_EXP) continue;
                         else if (f >= MAX_EXP) continue;
@@ -822,18 +821,15 @@ void *TrainModelThread(void *id) {
                         
                         // 'g' is the gradient multiplied by the learning rate
                         /**
-                         * f：                               表示根据当前非叶子节点（词）对其子节点（词）进行分类时得到的子节点的分类标签
-                         * 1 - vocab[word].code[d]：         表示在哈夫曼树中当前非叶子节点（词）的子节点（词）的真实分类标签（哈夫曼树中，编码0表示正类，编码1表示负类，(1 - 编码)即为分类标签）
-                         * 1 - vocab[word].code[d] - f：     即真实分类标签与预测分类标签之间的差值，也是梯度
-                         *
-                         * 当真实分类标签为1（哈夫曼编码为0）时，1 - vocab[word].code[d] - f >= 0，则g > 0，这时计算出来的词向量的修正量正向偏向当前非叶子节点（的词向量），表示要将上下文词向量往正类方向调整
-                         * 当真实分类标签为0（哈夫曼编码为1）时，1 - vocab[word].code[d] - f <= 0，则g < 0，这时计算出来的词向量的修正量反向偏离当前非叶子节点（的词向量），表示要将上下文词向量往负类方向调整
+                         * f：                               表示根据当前节点对其子节点进行分类时得到的子节点的分类标签
+                         * 1 - vocab[word].code[d]：         表示在哈夫曼树中当前节点的子节点的真实分类标签（哈夫曼树中，编码0表示正类，编码1表示负类，(1 - 编码)即为分类标签）
+                         * 1 - vocab[word].code[d] - f：     即真实分类标签与预测分类标签之间的差值
                          */
                         g = (1 - vocab[word].code[d] - f) * alpha;
                         // Propagate errors output -> hidden
-                        for (c = 0; c < layer1_size; c++) neu1e[c] += g * syn1[c + l2];            // 累加词向量的修正量，这里遍历了路径上的每个父节点，先对修正值进行累加，下面会更新到上下文词的词向量中
+                        for (c = 0; c < layer1_size; c++) neu1e[c] += g * syn1[c + l2];            // 累加词向量的修正量，这里遍历了路径上的每个节点，先累加修正量，下面会更新到上下文每个词的词向量中
                         // Learn weights hidden -> output
-                        for (c = 0; c < layer1_size; c++) syn1[c + l2] += g * neu1[c];             // 更新当前非叶子节点的词向量
+                        for (c = 0; c < layer1_size; c++) syn1[c + l2] += g * neu1[c];             // 更新当前节点的辅助向量
                     }
                     
                 // NEGATIVE SAMPLING
@@ -842,7 +838,7 @@ void *TrainModelThread(void *id) {
                  * negative也表示也采样次数，即采样negative个负样本，这样就收集了一个正样本和negative个负样本，在每个样本上进行一次训练
                  */
                 if (negative > 0)
-                    for (d = 0; d < negative + 1; d++) {
+                    for (d = 0; d < negative + 1; d++) {                                           // 在每一个样本上进行一次训练，累计训练误差
                         if (d == 0) {
                             target = word;                                                         // 当前词为正样本
                             label = 1;                                                             // 正样本标签为1
@@ -850,27 +846,27 @@ void *TrainModelThread(void *id) {
                             next_random = next_random * (unsigned long long) 25214903917 + 11;
                             target = table[(next_random >> 16) % table_size];                      // 负采样
                             if (target == 0) target = next_random % (vocab_size - 1) + 1;          // 采样到换行符，再采样一次
-                            if (target == word) continue;                                          // 采样到当前词，跳过
+                            if (target == word) continue;                                          // 采样到当前词，跳过，训练下一个样本
                             label = 0;                                                             // 负样本标签为0
                         }
-                        l2 = target * layer1_size;                                                 // 计算样本词向量在syn1neg的开始位置
+                        l2 = target * layer1_size;                                                 // l2用于定位样本辅助向量在syn1neg的开始位置
                         f = 0;
-                        for (c = 0; c < layer1_size; c++) f += neu1[c] * syn1neg[c + l2];          // 上下文词向量加和向量（已被平均） 与 负样本词向量 做内积
+                        for (c = 0; c < layer1_size; c++) f += neu1[c] * syn1neg[c + l2];          // 将上下文词的加和向量（已被平均） 与 负样本辅助向量 做内积
                         
                         /**
-                         * 从缓存中读取sigmod值，并计算梯度与学习率的乘积
+                         * 从缓存中读sigmod值，可以理解成预测负样本的标签，label为样本的真实分类，1,0,expTable(x)为预测分类，相减等到分类误差
                          */
                         if (f > MAX_EXP) g = (label - 1) * alpha;
                         else if (f < -MAX_EXP) g = (label - 0) * alpha;
                         else g = (label - expTable[(int) ((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))]) * alpha;
                         
-                        for (c = 0; c < layer1_size; c++) neu1e[c] += g * syn1neg[c + l2];         // 累加词向量的修正量，这里遍历了每个样本点（包括正负样本），先对修正值进行累加，下面会更新到上下文词的词向量中
-                        for (c = 0; c < layer1_size; c++) syn1neg[c + l2] += g * neu1[c];          // 更新负样本的词向量
+                        for (c = 0; c < layer1_size; c++) neu1e[c] += g * syn1neg[c + l2];         // 累加词向量的修正量，这里遍历了每个样本点（包括正负样本），先累加修正量，下面会更新到上下文每个词的词向量中
+                        for (c = 0; c < layer1_size; c++) syn1neg[c + l2] += g * neu1[c];          // 更新负样本的辅助向量
                     }
                     
                 // hidden -> in
                 /**
-                 * 将词向量的修正量更新到上下文中的每个词的词向量中
+                 * 将词向量的修正量更新到上下文每个词的词向量中
                  */
                 for (a = b; a < window * 2 + 1 - b; a++)
                     if (a != window) {
@@ -885,34 +881,34 @@ void *TrainModelThread(void *id) {
         }
         
         /**
-         * Skip-gram模型，用当前词来预测上下文的词，再反向修正当前词的词向量
+         * Skip-gram模型，用每一个上下文词来预测当前词，再反向修正该上下文词的词向量
          */
         else {  //train skip-gram
             for (a = b; a < window * 2 + 1 - b; a++)                                               // 遍历上下文中的每个词，做一次训练（当前词不用做训练）
                 if (a != window) {                                                                 // 跳过当前词
-                    c = sentence_position - window + a;                                            // 计算上下文词在句子中的位置
+                    c = sentence_position - window + a;                                            // c用于定位上下文词在句子中的真实位置，sentence_position位置是当前词
                     if (c < 0) continue;                                                           // 上下文窗口超出句子范围
                     if (c >= sentence_length) continue;                                            // 上下文窗口超出句子范围
-                    last_word = sen[c];                                                            // last_word表示上下文词在词库中的索引
+                    last_word = sen[c];                                                            // last_word表示上下文词
                     if (last_word == -1) continue;
-                    l1 = last_word * layer1_size;                                                  // l1表示该词的词向量在syn0的开始位置
-                    for (c = 0; c < layer1_size; c++) neu1e[c] = 0;                                // 词向量的修正量置0
+                    l1 = last_word * layer1_size;                                                  // l1用于定位上下文词的词向量在syn0中的起始位置
+                    for (c = 0; c < layer1_size; c++) neu1e[c] = 0;                                // 重置词向量的修正量为0
 
                     // HIERARCHICAL SOFTMAX
                     /**
                      * hierarchical softmax，用哈夫曼树进行训练
-                     * 遍历从根节点到当前词的叶子节点的路径，每个非叶子节点进行一次训练，可以理解成在已知父节点时，对子节点做一次二分类
+                     * 遍历当前词的哈夫曼路径，在每个非叶子节点进行一次训练，预测一次子节点，其实就是对子节点做一次二分类，累加每次预测的误差
                      */
                     if (hs)
-                        for (d = 0; d < vocab[word].codelen; d++) {                                // 从根节点开始，遍历路径上的每一个非叶子节点，注意是非叶子节点，其实是在根据父节点对子节点进行分类，预测子节点
+                        for (d = 0; d < vocab[word].codelen; d++) {                                // 从根节点开始，遍历路径上的每一个非叶子节点，注意是非叶子节点，根据父节点对子节点进行预测
                             f = 0;
-                            l2 = vocab[word].point[d] * layer1_size;                               // 计算当前非叶子节点词向量在syn1的开始位置
+                            l2 = vocab[word].point[d] * layer1_size;                               // l2用于定位当前节点的辅助向量在syn1的开始位置
 
                             // Propagate hidden -> output
-                            for (c = 0; c < layer1_size; c++) f += syn0[c + l1] * syn1[c + l2];    // 当前词向量 与 当前非叶子节点词向量 做内积
+                            for (c = 0; c < layer1_size; c++) f += syn0[c + l1] * syn1[c + l2];    // 将该上下文词词向量 与 当前节点辅助向量 做内积
 
                             /**
-                             * 从缓存中读取sigmod值，可以理解成在当前非叶子节点上进行的一次分类，word2vec中0表示正类，1表示负类
+                             * 从缓存中读sigmod值，可以理解成预测子节点的类别，word2vec中0表示正类，1表示负类，注意在以下代码中，当f值超出范围时，不对该节点进行预测，直接跳过该节点
                              */
                             if (f <= -MAX_EXP) continue;
                             else if (f >= MAX_EXP) continue;
@@ -920,18 +916,15 @@ void *TrainModelThread(void *id) {
 
                             // 'g' is the gradient multiplied by the learning rate
                             /**
-                             * f：                               表示根据当前非叶子节点（词）对其子节点（词）进行分类时得到的子节点的分类标签
-                             * 1 - vocab[word].code[d]：         表示在哈夫曼树中当前非叶子节点（词）的子节点（词）的真实分类标签（哈夫曼树中，编码0表示正类，编码1表示负类，(1 - 编码)即为分类标签）
-                             * 1 - vocab[word].code[d] - f：     即真实分类标签与预测分类标签之间的差值，也是梯度
-                             *
-                             * 当真实分类标签为1（哈夫曼编码为0）时，1 - vocab[word].code[d] - f >= 0，则g > 0，这时计算出来的词向量的修正量正向偏向当前非叶子节点（的词向量），表示要将当前词向量往正类方向调整
-                             * 当真实分类标签为0（哈夫曼编码为1）时，1 - vocab[word].code[d] - f <= 0，则g < 0，这时计算出来的词向量的修正量反向偏离当前非叶子节点（的词向量），表示要将当前词向量往负类方向调整
+                             * f：                               表示根据当前节点对其子节点进行分类时得到的子节点的分类标签
+                             * 1 - vocab[word].code[d]：         表示在哈夫曼树中当前节点的子节点的真实分类标签（哈夫曼树中，编码0表示正类，编码1表示负类，(1 - 编码)即为分类标签）
+                             * 1 - vocab[word].code[d] - f：     即真实分类标签与预测分类标签之间的差值
                              */
                             g = (1 - vocab[word].code[d] - f) * alpha;
                             // Propagate errors output -> hidden
-                            for (c = 0; c < layer1_size; c++) neu1e[c] += g * syn1[c + l2];        // 累加词向量的修正量，这里遍历了每一个样本（正负样本），先对修正值进行累加，下面会更新到当前词的词向量中
+                            for (c = 0; c < layer1_size; c++) neu1e[c] += g * syn1[c + l2];        // 累加词向量的修正量，这里遍历了路径上的每个节点，先累加修正量，下面会更新到该上下文词的词向量中
                             // Learn weights hidden -> output
-                            for (c = 0; c < layer1_size; c++) syn1[c + l2] += g * syn0[c + l1];    // 更新当前非叶子节点的词向量
+                            for (c = 0; c < layer1_size; c++) syn1[c + l2] += g * syn0[c + l1];    // 更新当前节点的辅助向量
                         }
 
                     // NEGATIVE SAMPLING
@@ -940,7 +933,7 @@ void *TrainModelThread(void *id) {
                      * negative也表示也采样次数，即采样negative个负样本，这样就收集了一个正样本和negative个负样本，在每个样本上进行一次训练
                      */
                     if (negative > 0)
-                        for (d = 0; d < negative + 1; d++) {
+                        for (d = 0; d < negative + 1; d++) {                                       // 在每一个样本上进行一次训练，累计训练误差
                             if (d == 0) {
                                 target = word;                                                     // 当前词为正样本
                                 label = 1;                                                         // 正样本标签为1
@@ -951,25 +944,25 @@ void *TrainModelThread(void *id) {
                                 if (target == word) continue;                                      // 采样到当前词，跳过
                                 label = 0;                                                         // 负样本标签为0
                             }
-                            l2 = target * layer1_size;                                             // 计算样本词向量在syn1neg的开始位置
+                            l2 = target * layer1_size;                                             // l2用于定位样本辅助向量在syn1neg的开始位置
                             f = 0;
-                            for (c = 0; c < layer1_size; c++) f += syn0[c + l1] * syn1neg[c + l2]; // 上下文词向量加和向量（已被平均） 与 负样本词向量 做内积
+                            for (c = 0; c < layer1_size; c++) f += syn0[c + l1] * syn1neg[c + l2]; // 将该上下文词词的词向量 与 负样本辅助向量 做内积
 
                             /**
-                             * 从缓存中读取sigmod值，并计算梯度与学习率的乘积
+                             * 从缓存中读sigmod值，可以理解成预测负样本的标签，label为样本的真实分类，1,0,expTable(x)为预测分类，相减等到分类误差
                              */
                             if (f > MAX_EXP) g = (label - 1) * alpha;
                             else if (f < -MAX_EXP) g = (label - 0) * alpha;
                             else g = (label - expTable[(int) ((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))]) * alpha;
 
-                            for (c = 0; c < layer1_size; c++) neu1e[c] += g * syn1neg[c + l2];     // 累加词向量的修正量，这里遍历了每个样本点（包括正负样本），先对修正值进行累加，下面会更新到上下文词的词向量中
-                            for (c = 0; c < layer1_size; c++) syn1neg[c + l2] += g * syn0[c + l1]; // 更新负样本的词向量
+                            for (c = 0; c < layer1_size; c++) neu1e[c] += g * syn1neg[c + l2];     // 累加词向量的修正量，这里遍历了每个样本点（包括正负样本），先累加修正量，下面会更新到该上下文词的词向量中
+                            for (c = 0; c < layer1_size; c++) syn1neg[c + l2] += g * syn0[c + l1]; // 更新负样本的辅助向量
                         }
                     // Learn weights input -> hidden
-                    for (c = 0; c < layer1_size; c++) syn0[c + l1] += neu1e[c];                    // 更新上下文件词的词向量
+                    for (c = 0; c < layer1_size; c++) syn0[c + l1] += neu1e[c];                    // 将词向量的修正量更新到该上下文词的词向量中
                 }
         }
-        sentence_position++;                                                                       // 训练句子中的下一个词
+        sentence_position++;                                                                       // 训练句子的下一个词
         if (sentence_position >= sentence_length) {                                                // 当前句子训练完成，训练下一个句子
             sentence_length = 0;
             continue;
